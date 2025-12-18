@@ -1,0 +1,30 @@
+{
+  "canisters": {
+    "chat_backend": {
+      "main": "example/chat_app.mo",
+      "type": "motoko",
+      "declarations": {
+        "bindings": [
+          "js",
+          "ts"
+        ],
+        "output": "./declarations/chat_backend"
+      }
+    },
+    "chat_frontend": {
+      "source": [
+        "example/chat_frontend/dist"
+      ],
+      "type": "assets",
+      "build": "pushd example/chat_frontend && npm run build && popd"
+    }
+  },
+  "defaults": {
+    "build": {
+      "args": "",
+      "packtool": "mops sources"
+    }
+  },
+  "output_env_file": ".env",
+  "version": 1
+}

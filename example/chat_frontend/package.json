@@ -1,0 +1,28 @@
+{
+  "name": "chat_frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "vite --port 3000",
+    "prebuild": "npm i --include=dev && dfx generate chat_backend",
+    "build": "vite build",
+    "format": "prettier --write \"src/**/*.{json,js,jsx,css,scss}\"",
+    "dev": "vite"
+
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "@dfinity/agent": "^3.0.0",
+    "@dfinity/candid": "^3.0.0",
+    "@dfinity/principal": "^3.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.0.1",
+    "dotenv": "^16.3.1",
+    "sass": "^1.63.6",
+    "vite": "^4.3.9",
+    "vite-plugin-environment": "^1.1.3"
+  }
+}

@@ -1,0 +1,7 @@
+.dfx/
+.idea/
+.mops/
+node_modules/
+dist/
+
+.env
