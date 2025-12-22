@@ -5,7 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 
 # Run every minute; adjust as needed
 [triggers]
-crons = ["*/10 * * * * *"]
+crons = ["*/1 * * * *"]
 
 [observability]
 [observability.logs]
