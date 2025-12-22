@@ -146,22 +146,45 @@ async function runCycle(env: Env) {
       collect: () => Promise<any[]>;
     };
 
-    log('Checking if queue is empty...');
-    const empty = await actor.isQueueEmpty();
-    log('isQueueEmpty =>', empty);
-    if (empty) {
-      log('Queue is empty. Nothing to do.');
-      return; // nothing to do
+    const INTERVAL_MS = 10_000; // target ~every 10s
+    const MAX_ITERATIONS = 6;   // up to 6 times per minute
+    const MAX_WINDOW_MS = 53_000; // leave a little headroom
+
+    const started = Date.now();
+    for (let i = 0; i < MAX_ITERATIONS; i++) {
+      const loopStart = Date.now();
+      log(`sub-iteration ${i + 1}/${MAX_ITERATIONS} start`);
+      try {
+        log('Checking if queue is empty...');
+        const empty = await actor.isQueueEmpty();
+        if (!empty) {
+          log('Collecting notifications...');
+          const batch = await actor.collect();
+          log('Collected batch size:', batch.length);
+          if (batch.length === 0) {
+            log('Batch is empty after collect.');
+          } else {
+            await sendWebPushBatch(batch, env as Env, (null as any));
+            log('Batch processing complete.');
+          }
+        }
+      } catch (e: any) {
+        err('sub-iteration error:', e?.stack || String(e));
+      }
+      const elapsed = Date.now() - loopStart;
+      const totalElapsed = Date.now() - started;
+      if (totalElapsed >= MAX_WINDOW_MS) {
+        log('Reached time window limit for this runCycle invocation. Stopping.');
+        break;
+      }
+      if (i < MAX_ITERATIONS - 1) {
+        const sleepMs = INTERVAL_MS - elapsed;
+        if (sleepMs > 0) {
+          log(`Sleeping ~${sleepMs}ms before next sub-iteration`);
+          await new Promise((r) => setTimeout(r, sleepMs));
+        }
+      }
     }
-    log('Collecting notifications...');
-    const batch = await actor.collect();
-    log('Collected batch size:', batch.length);
-    if (batch.length === 0) {
-      log('Batch is empty after collect.');
-      return;
-    }
-    await sendWebPushBatch(batch, env as Env, (null as any));
-    log('Batch processing complete.');
   } catch (e: any) {
     err('runCycle() error:', e?.stack || String(e));
   } finally {
