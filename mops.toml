@@ -1,5 +1,7 @@
 [dependencies]
 base = "0.16.0"
+core = "2.0.0"
+promtracker = "0.6.0"
 
 [toolchain]
 moc = "0.16.3"

@@ -1,6 +1,7 @@
 .dfx/
 .idea/
 .mops/
+.wrangler/
 node_modules/
 dist/
 
