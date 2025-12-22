@@ -1,9 +1,57 @@
 import {useEffect, useRef, useState} from 'react';
 import {createPortal} from 'react-dom';
-import {chat_backend} from 'declarations/chat_backend';
+import {canisterId, createActor} from 'declarations/chat_backend';
+import {HttpAgent} from '@dfinity/agent';
+import {Ed25519KeyIdentity} from '@dfinity/identity';
 import './index.scss';
 
+const ID_STORAGE_KEY = 'chat.identity';
+
+async function getOrCreateIdentity() {
+    try {
+        const stored = localStorage.getItem(ID_STORAGE_KEY);
+        if (stored) {
+            const parsed = JSON.parse(stored);
+            return Ed25519KeyIdentity.fromJSON(parsed);
+        }
+    } catch (e) {
+        console.warn('Failed to load stored identity, generating new one', e);
+    }
+    const identity = Ed25519KeyIdentity.generate();
+    try {
+        localStorage.setItem(ID_STORAGE_KEY, JSON.stringify(identity.toJSON()));
+    } catch (_) {
+    }
+    return identity;
+}
+
+// VAPID public key used by PushManager (must match backend NotificationCanister.updateApplication)
+const VAPID_PUBLIC_KEY = 'BK2eDWyXNMc9gwVd5vRCR8cNz2hgEE0vaUvH50LhtuCfj2v73P15taeCzSXEuSMlKeBmXO0Akyd4TN9DO-R9hDM';
+
+function urlBase64ToUint8Array(base64String) {
+    const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const rawData = atob(base64);
+    const outputArray = new Uint8Array(rawData.length);
+    for (let i = 0; i < rawData.length; ++i) {
+        outputArray[i] = rawData.charCodeAt(i);
+    }
+    return outputArray;
+}
+
+function arrayBufferToBase64Url(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    const base64 = btoa(binary);
+    return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 function App() {
+    const [actor, setActor] = useState(null);
+    const actorRef = useRef(null);
     const [currentView, setCurrentView] = useState('home'); // 'home', 'room', 'join'
     const [roomCode, setRoomCode] = useState('');
     const [joinCode, setJoinCode] = useState('');
@@ -28,6 +76,91 @@ function App() {
     useEffect(() => {
         scrollToBottom();
     }, [messages]);
+
+    useEffect(() => {
+        (async () => {
+            try {
+                const identity = await getOrCreateIdentity();
+                const agent = new HttpAgent({identity});
+                if (import.meta && import.meta.env && import.meta.env.MODE !== 'production') {
+                    try {
+                        await agent.fetchRootKey();
+                    } catch (e) {
+                        console.warn('fetchRootKey failed', e);
+                    }
+                } else if (typeof process !== 'undefined' && process.env && process.env.DFX_NETWORK !== 'ic') {
+                    try {
+                        await agent.fetchRootKey();
+                    } catch (e) {
+                        console.warn('fetchRootKey failed', e);
+                    }
+                }
+                const a = createActor(canisterId, {agent});
+                actorRef.current = a;
+                setActor(a);
+            } catch (e) {
+                console.error('Failed to init identity/actor', e);
+            }
+        })();
+    }, []);
+
+    // Register Service Worker and request Notification permission on first load
+    useEffect(() => {
+        (async () => {
+            try {
+                if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+                    console.warn('Push notifications not supported in this browser.');
+                    return;
+                }
+                // Register the service worker
+                const reg = await navigator.serviceWorker.register('/sw.js');
+                await navigator.serviceWorker.ready;
+
+                // Ask for permission
+                let permission = Notification.permission;
+                if (permission === 'default') {
+                    permission = await Notification.requestPermission();
+                }
+                if (permission !== 'granted') {
+                    console.log('Notifications permission not granted');
+                    return;
+                }
+
+                let sub = await reg.pushManager.getSubscription();
+                if (!sub) {
+                    sub = await reg.pushManager.subscribe({
+                        userVisibleOnly: true,
+                        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+                    });
+                }
+
+                // Prepare subscription payload for backend
+                const p256dh = arrayBufferToBase64Url(sub.getKey('p256dh'));
+                const auth = arrayBufferToBase64Url(sub.getKey('auth'));
+                const endpoint = sub.endpoint;
+                const expirationTime = sub.expirationTime; // may be null
+
+                const payload = {
+                    endpoint,
+                    expirationTime: expirationTime === null ? [] : [Number(expirationTime)],
+                    keys: {p256dh, auth},
+                };
+                // Call backend subscribe (idempotent on server)
+                try {
+                    if (!actorRef.current) {
+                        console.warn('Actor not ready yet; skipping subscribe for now');
+                    } else {
+                        await actorRef.current.subscribe(payload);
+                        console.log('Registered push subscription');
+                    }
+                } catch (e) {
+                    console.warn('Failed to call subscribe on backend', e);
+                }
+            } catch (e) {
+                console.warn('Push registration failed', e);
+            }
+        })();
+    }, []);
 
     // Check for room code in URL on component mount
     useEffect(() => {
@@ -56,7 +189,8 @@ function App() {
         if (currentView === 'room' && roomCode) {
             const interval = setInterval(async () => {
                 try {
-                    const roomMessages = await chat_backend.getMessages(roomCode);
+                    if (!actorRef.current) return;
+                    const roomMessages = await actorRef.current.getMessages(roomCode);
                     setMessages(roomMessages);
                 } catch (err) {
                     console.error('Error fetching messages:', err);
@@ -72,7 +206,8 @@ function App() {
         if (currentView === 'room' && roomCode) {
             const interval = setInterval(async () => {
                 try {
-                    const result = await chat_backend.getRoom(roomCode);
+                    if (!actorRef.current) return;
+                    const result = await actorRef.current.getRoom(roomCode);
                     if (Array.isArray(result) && result.length > 0) {
                         setRoom(result[0]);
                     } else {
@@ -107,15 +242,22 @@ function App() {
         return () => clearInterval(interval);
     }, [currentView, room]);
 
+    useEffect(() => {
+        const stored = localStorage.getItem('chat.sessionId');
+        if (stored) setSessionId(stored);
+    }, []);
+
     const handleCreateRoom = async () => {
         try {
             setError('');
-            const result = await chat_backend.createRoom();
+            if (!actorRef.current) throw new Error('Actor not ready');
+            const result = await actorRef.current.createRoom();
 
             if ('Ok' in result) {
                 setRoomCode(result.Ok.roomCode);
                 setRoom(result.Ok.room);
                 setSessionId(result.Ok.sessionId);
+                localStorage.setItem('chat.sessionId', result.Ok.sessionId);
                 setMessages(result.Ok.room.messages);
                 setIsCreator(true);
                 setCurrentView('room');
@@ -134,7 +276,8 @@ function App() {
         const confirmEnd = window.confirm('End room for all participants? This cannot be undone.');
         if (!confirmEnd) return;
         try {
-            const ok = await chat_backend.endRoom(roomCode, sessionId);
+            if (!actorRef.current) throw new Error('Actor not ready');
+            const ok = await actorRef.current.endRoom(roomCode, sessionId);
             if (ok) {
                 setShowExpiredModal(true);
                 setIsExpired(true);
@@ -154,12 +297,15 @@ function App() {
 
         try {
             setError('');
-            const result = await chat_backend.joinRoom(joinCode.trim().toUpperCase());
+            const code = joinCode.trim().toUpperCase();
+            if (!actorRef.current) throw new Error('Actor not ready');
+            const result = await actorRef.current.joinRoom(code);
 
             if ('Ok' in result) {
                 setRoomCode(joinCode.trim().toUpperCase());
                 setRoom(result.Ok.room);
                 setSessionId(result.Ok.sessionId);
+                localStorage.setItem('chat.sessionId', result.Ok.sessionId);
                 setMessages(result.Ok.room.messages);
                 setIsCreator(false);
                 setCurrentView('room');
@@ -178,7 +324,8 @@ function App() {
         if (!newMessage.trim() || !sessionId || isExpired) return;
 
         try {
-            const result = await chat_backend.sendMessage(roomCode, sessionId, newMessage.trim());
+            if (!actorRef.current) throw new Error('Actor not ready');
+            const result = await actorRef.current.sendMessage(roomCode, sessionId, newMessage.trim());
 
             if ('Ok' in result) {
                 setMessages(prev => [...prev, result.Ok]);
@@ -194,7 +341,8 @@ function App() {
     const handleLeaveRoom = async () => {
         try {
             if (sessionId) {
-                await chat_backend.leaveRoom(roomCode, sessionId);
+                if (!actorRef.current) throw new Error('Actor not ready');
+                await actorRef.current.leaveRoom(roomCode, sessionId);
             }
             setCurrentView('home');
             setRoomCode('');
@@ -203,7 +351,6 @@ function App() {
             setNewMessage('');
             setError('');
             setIsCreator(false);
-            setSessionId('');
             // Clear URL parameters
             window.history.pushState({}, '', window.location.pathname);
         } catch (err) {

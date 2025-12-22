@@ -1,0 +1,11 @@
+{
+  "chat_backend": {
+    "ic": "z3qa4-fiaaa-aaaao-a43ba-cai"
+  },
+  "chat_frontend": {
+    "ic": "z4rgi-iqaaa-aaaao-a43bq-cai"
+  },
+  "notification_canister": {
+    "ic": "zjwxf-jyaaa-aaaao-a43ca-cai"
+  }
+}

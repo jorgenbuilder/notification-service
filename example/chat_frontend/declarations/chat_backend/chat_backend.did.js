@@ -35,6 +35,11 @@ export const idlFactory = ({ IDL }) => {
     'Err' : IDL.Text,
   });
   const SendMessageResult = IDL.Variant({ 'Ok' : Message, 'Err' : IDL.Text });
+  const Subscription = IDL.Record({
+    'endpoint' : IDL.Text,
+    'keys' : IDL.Record({ 'auth' : IDL.Text, 'p256dh' : IDL.Text }),
+    'expirationTime' : IDL.Opt(IDL.Nat),
+  });
   return IDL.Service({
     'cleanup' : IDL.Func([], [], []),
     'createRoom' : IDL.Func([], [CreateRoomResult], []),
@@ -54,6 +59,7 @@ export const idlFactory = ({ IDL }) => {
         [SendMessageResult],
         [],
       ),
+    'subscribe' : IDL.Func([Subscription], [], []),
   });
 };
 export const init = ({ IDL }) => { return []; };

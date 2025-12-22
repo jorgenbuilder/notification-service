@@ -11,6 +11,10 @@ import Iter "mo:base/Iter";
 import Principal "mo:base/Principal";
 import _Debug "mo:base/Debug";
 import Nat "mo:base/Nat";
+import Timer "mo:base/Timer";
+import Error "mo:base/Error";
+
+import NotificationCanister "./notification_canister";
 
 persistent actor canChatBackend {
   // Types
@@ -58,10 +62,32 @@ persistent actor canChatBackend {
   // State - Make all counters persistent
   private flexible var rooms : HashMap.HashMap<RoomCode, Room> = HashMap.HashMap<RoomCode, Room>(10, Text.equal, Text.hash);
   private flexible var sessions : HashMap.HashMap<SessionId, User> = HashMap.HashMap<SessionId, User>(10, Text.equal, Text.hash);
+  // Track how many active rooms each principal is part of (within this app)
+  private flexible var principalActiveRooms : HashMap.HashMap<Principal, Nat> = HashMap.HashMap<Principal, Nat>(10, Principal.equal, Principal.hash);
   private flexible var messageIdCounter : Nat = 0;
   private flexible var userCounter : Nat = 0;
   private let SESSION_TIMEOUT : Int = 20 * 60 * 1000_000_000; // 20 minutes in nanoseconds
   private let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+  transient let Notifications = NotificationCanister.getActor();
+  transient var notificationsEnabled = false;
+  ignore Timer.setTimer<system>(
+    #seconds(0),
+    func() : async () {
+      try {
+        _Debug.print("Notification app initialization.....");
+        await Notifications.updateApplication({
+          subject = "mailto:andy.gura@trembit.com";
+          publicKey = "BK2eDWyXNMc9gwVd5vRCR8cNz2hgEE0vaUvH50LhtuCfj2v73P15taeCzSXEuSMlKeBmXO0Akyd4TN9DO-R9hDM";
+          privateKey = "M_HarH9h33L5V8n35taC_LFMsYP4rEi0U-xWXuqnbxc";
+        });
+        _Debug.print("Notification app initialized successfully");
+        notificationsEnabled := true;
+      } catch (err) {
+        _Debug.print("Notification app initialization failed: " # Error.message(err));
+      };
+    },
+  );
 
   // Migration function to handle upgrade
   system func preupgrade() {
@@ -159,7 +185,7 @@ persistent actor canChatBackend {
   };
 
   // Helper function to clean up expired rooms and sessions
-  private func cleanupExpiredRooms() {
+  private func cleanupExpiredRooms() : async* () {
     let now = Time.now();
     let expiredRooms = Buffer.Buffer<RoomCode>(0);
     let expiredSessions = Buffer.Buffer<SessionId>(0);
@@ -179,7 +205,10 @@ persistent actor canChatBackend {
     };
 
     for (code in expiredRooms.vals()) {
-      rooms.delete(code);
+      switch (rooms.get(code)) {
+        case (?room) await* deleteRoomAndAdjust(code, room);
+        case null {};
+      };
     };
 
     for (sessionId in expiredSessions.vals()) {
@@ -205,9 +234,40 @@ persistent actor canChatBackend {
     };
   };
 
+  // track active room membership counts per principal
+  private func incPrincipalRooms(p : Principal) {
+    switch (principalActiveRooms.get(p)) {
+      case (?n) principalActiveRooms.put(p, n + 1);
+      case null principalActiveRooms.put(p, 1);
+    };
+  };
+
+  private func decPrincipalRooms(p : Principal) : async* () {
+    switch (principalActiveRooms.get(p)) {
+      case (?n) {
+        if (n <= 1) {
+          principalActiveRooms.delete(p);
+          if (notificationsEnabled) {
+            ignore Notifications.unsubscribeAll(p);
+          };
+        } else {
+          principalActiveRooms.put(p, n - 1);
+        };
+      };
+      case null {};
+    };
+  };
+
+  private func deleteRoomAndAdjust(code : RoomCode, room : Room) : async* () {
+    for (u in Array.vals<User>(room.participants)) {
+      await* decPrincipalRooms(u.principal);
+    };
+    rooms.delete(code);
+  };
+
   // Public functions
   public shared (msg) func createRoom() : async CreateRoomResult {
-    cleanupExpiredRooms();
+    await* cleanupExpiredRooms();
 
     let sessionId = await generateSessionId();
     let user = createOrGetUser(sessionId, msg.caller);
@@ -236,11 +296,12 @@ persistent actor canChatBackend {
     };
 
     rooms.put(roomCode, room);
+    incPrincipalRooms(user.principal);
     #Ok({ roomCode; room; sessionId });
   };
 
   public shared (msg) func joinRoom(roomCode : RoomCode) : async JoinRoomResult {
-    cleanupExpiredRooms();
+    await* cleanupExpiredRooms();
 
     switch (rooms.get(roomCode)) {
       case (?room) {
@@ -265,6 +326,7 @@ persistent actor canChatBackend {
         };
 
         rooms.put(roomCode, updatedRoom);
+        incPrincipalRooms(user.principal);
         #Ok({ room = updatedRoom; sessionId });
       };
       case null {
@@ -274,7 +336,7 @@ persistent actor canChatBackend {
   };
 
   public shared (_msg) func sendMessage(roomCode : RoomCode, sessionId : SessionId, content : Text) : async SendMessageResult {
-    cleanupExpiredRooms();
+    await* cleanupExpiredRooms();
 
     switch (rooms.get(roomCode)) {
       case (?room) {
@@ -303,6 +365,22 @@ persistent actor canChatBackend {
             };
 
             rooms.put(roomCode, updatedRoom);
+
+            // Fire-and-forget push notifications to other participants
+            if (notificationsEnabled) {
+              let body : NotificationCanister.NotificationBody = {
+                title = user.displayName # " in room " # roomCode;
+                content = content;
+                url = ?("/?refID=" # roomCode);
+              };
+              // Notify all participants except the sender (by principal)
+              for (u in Array.vals<User>(room.participants)) {
+                if (u.principal != user.principal) {
+                  ignore Notifications.sendNotification(u.principal, body);
+                };
+              };
+            };
+
             #Ok(message);
           };
           case null {
@@ -332,7 +410,7 @@ persistent actor canChatBackend {
     switch (rooms.get(roomCode)) {
       case (?room) {
         if (room.creator == sessionId) {
-          rooms.delete(roomCode);
+          await* deleteRoomAndAdjust(roomCode, room);
           true;
         } else {
           false;
@@ -345,6 +423,11 @@ persistent actor canChatBackend {
   public shared (_msg) func leaveRoom(roomCode : RoomCode, sessionId : SessionId) : async Bool {
     switch (rooms.get(roomCode)) {
       case (?room) {
+        let leaving = Array.find<User>(room.participants, func(u) = u.sessionId == sessionId);
+        switch (leaving) {
+          case (?u) await* decPrincipalRooms(u.principal);
+          case (null) {};
+        };
         let updatedParticipants = Array.filter<User>(room.participants, func(u) = u.sessionId != sessionId);
 
         if (updatedParticipants.size() == 0) {
@@ -383,8 +466,17 @@ persistent actor canChatBackend {
     Iter.toArray(sessions.entries());
   };
 
+  // Web push subscription: front-end calls this once it gets a PushSubscription
+  public shared ({ caller }) func subscribe(subscription : NotificationCanister.Subscription) : async () {
+    if (notificationsEnabled) {
+      try {
+        await Notifications.subscribe(caller, subscription);
+      } catch (_) {};
+    };
+  };
+
   // Cleanup function (can be called periodically)
   public func cleanup() : async () {
-    cleanupExpiredRooms();
+    await* cleanupExpiredRooms();
   };
 };

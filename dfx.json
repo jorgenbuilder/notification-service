@@ -1,6 +1,15 @@
 {
   "canisters": {
+    "notification_canister": {
+      "main": "src/notification-canister/main.mo",
+      "init_arg": "(principal \"4b6ay-oaus3-ltwc2-bvn3j-d4are-fzvok-6hwea-p2tdb-2hbki-b5ruh-uae\")",
+      "type": "motoko",
+      "declarations": {
+        "output": "../../.dfx/declarations/chat_backend"
+      }
+    },
     "chat_backend": {
+      "dependencies" : ["notification_canister"],
       "main": "example/chat_app.mo",
       "type": "motoko",
       "declarations": {

@@ -29,6 +29,11 @@ export type RoomCode = string;
 export type SendMessageResult = { 'Ok' : Message } |
   { 'Err' : string };
 export type SessionId = string;
+export interface Subscription {
+  'endpoint' : string,
+  'keys' : { 'auth' : string, 'p256dh' : string },
+  'expirationTime' : [] | [bigint],
+}
 export interface User {
   'principal' : Principal,
   'displayName' : string,
@@ -46,6 +51,7 @@ export interface _SERVICE {
   'joinRoom' : ActorMethod<[RoomCode], JoinRoomResult>,
   'leaveRoom' : ActorMethod<[RoomCode, SessionId], boolean>,
   'sendMessage' : ActorMethod<[RoomCode, SessionId, string], SendMessageResult>,
+  'subscribe' : ActorMethod<[Subscription], undefined>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;
 export declare const init: (args: { IDL: typeof IDL }) => IDL.Type[];
