@@ -5,23 +5,110 @@ import {HttpAgent} from '@dfinity/agent';
 import {Ed25519KeyIdentity} from '@dfinity/identity';
 import './index.scss';
 
-const ID_STORAGE_KEY = 'chat.identity';
+const ID_STORAGE_KEY_V2 = 'chat.identity.v2';
+const ID_STORAGE_SOURCE_KEY = 'chat.identity.source';
 
-async function getOrCreateIdentity() {
+// Simple IndexedDB helpers
+function openIdb() {
+    return new Promise((resolve, reject) => {
+        if (!('indexedDB' in window)) return resolve(null);
+        const req = indexedDB.open('chat-idb', 1);
+        req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv');
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+    });
+}
+function idbGet(db, key) {
+    return new Promise((resolve) => {
+        if (!db) return resolve(null);
+        const tx = db.transaction('kv', 'readonly');
+        const store = tx.objectStore('kv');
+        const req = store.get(key);
+        req.onsuccess = () => resolve(req.result ?? null);
+        req.onerror = () => resolve(null);
+    });
+}
+function idbSet(db, key, value) {
+    return new Promise((resolve) => {
+        if (!db) return resolve(false);
+        const tx = db.transaction('kv', 'readwrite');
+        const store = tx.objectStore('kv');
+        const req = store.put(value, key);
+        req.onsuccess = () => resolve(true);
+        req.onerror = () => resolve(false);
+    });
+}
+
+async function getOrCreateIdentity(setDiag) {
+    let lastError = '';
+
+    const b64ToUint8 = (b64) => {
+        try {
+            const clean = String(b64).replace(/\s+/g, '');
+            const bin = atob(clean);
+            const arr = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+            return arr;
+        } catch (e) {
+            throw new Error('invalid base64');
+        }
+    };
+
     try {
-        const stored = localStorage.getItem(ID_STORAGE_KEY);
-        if (stored) {
-            const parsed = JSON.parse(stored);
-            return Ed25519KeyIdentity.fromJSON(parsed);
+        const storedV2 = localStorage.getItem(ID_STORAGE_KEY_V2);
+        if (storedV2) {
+            const parsed = JSON.parse(storedV2);
+            if (parsed && parsed.v === 2 && parsed.type === 'ed25519' && parsed.sk) {
+                const id = Ed25519KeyIdentity.fromSecretKey(b64ToUint8(parsed.sk));
+                try { localStorage.setItem(ID_STORAGE_SOURCE_KEY, 'localStorage(v2)'); } catch (_) {}
+                if (setDiag) setDiag({ source: 'localStorage(v2)', error: '' });
+                return id;
+            }
         }
     } catch (e) {
-        console.warn('Failed to load stored identity, generating new one', e);
+        lastError = 'localStorage v2 read failed: ' + (e?.message || String(e));
     }
-    const identity = Ed25519KeyIdentity.generate();
+
     try {
-        localStorage.setItem(ID_STORAGE_KEY, JSON.stringify(identity.toJSON()));
-    } catch (_) {
+        const db = await openIdb();
+        const stored = await idbGet(db, ID_STORAGE_KEY_V2);
+        if (stored) {
+            const parsed = typeof stored === 'string' ? JSON.parse(stored) : stored;
+            if (parsed && parsed.v === 2 && parsed.type === 'ed25519' && parsed.sk) {
+                const id = Ed25519KeyIdentity.fromSecretKey(b64ToUint8(parsed.sk));
+                // Repair localStorage with V2
+                try { localStorage.setItem(ID_STORAGE_KEY_V2, JSON.stringify(parsed)); } catch (_) {}
+                try { localStorage.setItem(ID_STORAGE_SOURCE_KEY, 'indexedDB(v2)'); } catch (_) {}
+                if (setDiag) setDiag({ source: 'indexedDB(v2)', error: '' });
+                return id;
+            }
+        }
+    } catch (e) {
+        lastError = (lastError ? lastError + ' | ' : '') + 'indexedDB v2 read failed: ' + (e?.message || String(e));
     }
+
+
+    const identity = Ed25519KeyIdentity.generate();
+    const skArr = Array.from(identity.getKeyPair().secretKey);
+    let skBin = '';
+    for (let i = 0; i < skArr.length; i++) skBin += String.fromCharCode(skArr[i]);
+    const v2wrapper = { v: 2, type: 'ed25519', sk: btoa(skBin) };
+    try {
+        localStorage.setItem(ID_STORAGE_KEY_V2, JSON.stringify(v2wrapper));
+        localStorage.setItem(ID_STORAGE_SOURCE_KEY, 'generated(v2)');
+    } catch (e) {
+        lastError = (lastError ? lastError + ' | ' : '') + 'localStorage v2 write failed: ' + (e?.message || String(e));
+    }
+    try {
+        const db = await openIdb();
+        await idbSet(db, ID_STORAGE_KEY_V2, JSON.stringify(v2wrapper));
+    } catch (e) {
+        lastError = (lastError ? lastError + ' | ' : '') + 'indexedDB v2 write failed: ' + (e?.message || String(e));
+    }
+    if (setDiag) setDiag({ source: 'generated(v2)', error: lastError });
     return identity;
 }
 
@@ -73,6 +160,12 @@ function App() {
     const [permissionStatus, setPermissionStatus] = useState(typeof Notification !== 'undefined' ? Notification.permission : 'default');
     const [pushStatus, setPushStatus] = useState('idle'); // 'idle' | 'subscribed' | 'error'
     const [pushError, setPushError] = useState('');
+    const [myPrincipal, setMyPrincipal] = useState('');
+    // Identity/storage diagnostics
+    const [idStorageSource, setIdStorageSource] = useState('');
+    const [idStorageError, setIdStorageError] = useState('');
+    const [persistGranted, setPersistGranted] = useState(null); // null | boolean
+    const [persistSupported, setPersistSupported] = useState(false);
 
     const SESSION_TIMEOUT_MS = 20 * 60 * 1000; // Keep in sync with backend
 
@@ -87,7 +180,16 @@ function App() {
     useEffect(() => {
         (async () => {
             try {
-                const identity = await getOrCreateIdentity();
+                const identity = await getOrCreateIdentity((diag) => {
+                    if (!diag) return;
+                    if (diag.source) setIdStorageSource(diag.source);
+                    if (diag.error) setIdStorageError(diag.error);
+                });
+                try {
+                    setMyPrincipal(identity.getPrincipal().toText());
+                } catch (_) {
+                    // ignore
+                }
                 const agent = new HttpAgent({identity});
                 if (import.meta && import.meta.env && import.meta.env.MODE !== 'production') {
                     try {
@@ -107,6 +209,7 @@ function App() {
                 setActor(a);
             } catch (e) {
                 console.error('Failed to init identity/actor', e);
+                setIdStorageError((prev) => prev ? prev + ' | ' + (e?.message || String(e)) : (e?.message || String(e)));
             }
         })();
     }, []);
@@ -152,6 +255,37 @@ function App() {
                 setPushError('Service worker registration failed: ' + (e?.message || e));
             }
         })();
+    }, []);
+
+    // Request persistent storage (helps Safari/iOS and desktop not evict data)
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                if (!('storage' in navigator) || !navigator.storage || !navigator.storage.persist) {
+                    if (!cancelled) setPersistSupported(false);
+                    return;
+                }
+                setPersistSupported(true);
+                // First check if already persisted
+                if (navigator.storage.persisted) {
+                    try {
+                        const already = await navigator.storage.persisted();
+                        if (!cancelled) setPersistGranted(!!already);
+                    } catch (_) {}
+                }
+                // Request persistence if not already granted
+                if (navigator.storage.persist) {
+                    try {
+                        const granted = await navigator.storage.persist();
+                        if (!cancelled) setPersistGranted(!!granted);
+                    } catch (_) {}
+                }
+            } catch (e) {
+                if (!cancelled) setIdStorageError((prev) => prev ? prev + ' | persist() error: ' + (e?.message || String(e)) : 'persist() error: ' + (e?.message || String(e)));
+            }
+        })();
+        return () => { cancelled = true; };
     }, []);
 
     // Listen for messages from Service Worker (e.g., OPEN_URL from notificationclick)
@@ -497,6 +631,12 @@ function App() {
                             <div>Service Worker: {swReady ? 'ready' : 'not ready'}</div>
                             <div>Permission: {permissionStatus}</div>
                             <div>Push: {pushStatus}</div>
+                            <div>My principal: {myPrincipal || 'unknown'}</div>
+                            <div>Identity storage: {idStorageSource || 'unknown'}</div>
+                            <div>
+                                Storage persistence: {persistSupported ? (persistGranted === null ? 'checking…' : (persistGranted ? 'granted' : 'not granted')) : 'unsupported'}
+                            </div>
+                            {idStorageError && <div className="error" style={{marginTop: '8px'}}>Identity storage error: {idStorageError}</div>}
                             {pushError && <div className="error" style={{marginTop: '8px'}}>{pushError}</div>}
                         </div>
                         <div className="button-group" style={{marginTop: '12px'}}>
