@@ -1,0 +1,23 @@
+# Keep the image small by excluding local artifacts
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-store
+
+# Build outputs
+/dist
+
+# VCS and editor cruft
+.git
+.gitignore
+.idea
+.DS_Store
+
+# Environment files (never bake secrets into the image)
+.env
+.env.*
+
+# OS/CI
+.tmp
+.cache
