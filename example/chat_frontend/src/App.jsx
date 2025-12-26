@@ -67,6 +67,13 @@ function App() {
     const [isExpired, setIsExpired] = useState(false);
     const [showExpiredModal, setShowExpiredModal] = useState(false);
 
+    // PWA / Push state
+    const [swReady, setSwReady] = useState(false);
+    const [swReg, setSwReg] = useState(null);
+    const [permissionStatus, setPermissionStatus] = useState(typeof Notification !== 'undefined' ? Notification.permission : 'default');
+    const [pushStatus, setPushStatus] = useState('idle'); // 'idle' | 'subscribed' | 'error'
+    const [pushError, setPushError] = useState('');
+
     const SESSION_TIMEOUT_MS = 20 * 60 * 1000; // Keep in sync with backend
 
     const scrollToBottom = () => {
@@ -104,63 +111,141 @@ function App() {
         })();
     }, []);
 
-    // Register Service Worker and request Notification permission on first load
+    // Register Service Worker on first load (no permission request on iOS without user gesture)
     useEffect(() => {
         (async () => {
+            if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+                console.warn('Push notifications not supported in this browser.');
+                setPushError('Push notifications not supported on this device/browser');
+                return;
+            }
             try {
-                if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-                    console.warn('Push notifications not supported in this browser.');
-                    return;
-                }
-                // Register the service worker
                 const reg = await navigator.serviceWorker.register('/sw.js');
+                setSwReg(reg);
                 await navigator.serviceWorker.ready;
+                setSwReady(true);
+                setPermissionStatus(typeof Notification !== 'undefined' ? Notification.permission : 'default');
 
-                // Ask for permission
-                let permission = Notification.permission;
-                if (permission === 'default') {
-                    permission = await Notification.requestPermission();
-                }
-                if (permission !== 'granted') {
-                    console.log('Notifications permission not granted');
-                    return;
-                }
-
-                let sub = await reg.pushManager.getSubscription();
-                if (!sub) {
-                    sub = await reg.pushManager.subscribe({
-                        userVisibleOnly: true,
-                        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
-                    });
-                }
-
-                // Prepare subscription payload for backend
-                const p256dh = arrayBufferToBase64Url(sub.getKey('p256dh'));
-                const auth = arrayBufferToBase64Url(sub.getKey('auth'));
-                const endpoint = sub.endpoint;
-                const expirationTime = sub.expirationTime; // may be null
-
-                const payload = {
-                    endpoint,
-                    expirationTime: expirationTime === null ? [] : [Number(expirationTime)],
-                    keys: {p256dh, auth},
-                };
-                // Call backend subscribe (idempotent on server)
+                // If already subscribed (e.g., after reinstall), send to backend
                 try {
-                    if (!actorRef.current) {
-                        console.warn('Actor not ready yet; skipping subscribe for now');
-                    } else {
-                        await actorRef.current.subscribe(payload);
-                        console.log('Registered push subscription');
+                    const sub = await reg.pushManager.getSubscription();
+                    if (sub) {
+                        const p256dh = arrayBufferToBase64Url(sub.getKey('p256dh'));
+                        const auth = arrayBufferToBase64Url(sub.getKey('auth'));
+                        const endpoint = sub.endpoint;
+                        const expirationTime = sub.expirationTime; // may be null
+                        const payload = {
+                            endpoint,
+                            expirationTime: expirationTime === null ? [] : [Number(expirationTime)],
+                            keys: { p256dh, auth },
+                        };
+                        if (actorRef.current) {
+                            await actorRef.current.subscribe(payload);
+                            setPushStatus('subscribed');
+                        }
                     }
                 } catch (e) {
-                    console.warn('Failed to call subscribe on backend', e);
+                    console.warn('Existing push subscription check failed', e);
                 }
             } catch (e) {
-                console.warn('Push registration failed', e);
+                console.warn('Service worker registration failed', e);
+                setPushError('Service worker registration failed: ' + (e?.message || e));
             }
         })();
     }, []);
+
+    // Listen for messages from Service Worker (e.g., OPEN_URL from notificationclick)
+    useEffect(() => {
+        function onSwMessage(event) {
+            try {
+                const data = event?.data || {};
+                if (data?.type === 'OPEN_URL' && data?.url) {
+                    const url = data.url;
+                    // Only handle same-origin http(s) URLs
+                    const target = new URL(url, window.location.origin);
+                    if (target.origin !== window.location.origin) return;
+                    // If we are already at target, just focus
+                    if (window.location.href === target.href) return;
+                    // Navigate the page so initial URL parsing logic runs (joins by refID)
+                    window.location.href = target.href;
+                }
+            } catch (_) {
+                // ignore
+            }
+        }
+        if (navigator?.serviceWorker) {
+            navigator.serviceWorker.addEventListener('message', onSwMessage);
+        }
+        return () => {
+            if (navigator?.serviceWorker) {
+                navigator.serviceWorker.removeEventListener('message', onSwMessage);
+            }
+        };
+    }, []);
+
+    // User-gesture flow to enable push on iOS
+    async function enablePush() {
+        try {
+            setPushError('');
+            if (!swReg) {
+                // Ensure SW is ready
+                const reg = await navigator.serviceWorker.register('/sw.js');
+                setSwReg(reg);
+                await navigator.serviceWorker.ready;
+                setSwReady(true);
+            }
+            const perm = await Notification.requestPermission();
+            setPermissionStatus(perm);
+            if (perm !== 'granted') {
+                setPushStatus('error');
+                setPushError('Notification permission not granted');
+                return;
+            }
+            let sub = await swReg.pushManager.getSubscription();
+            if (!sub) {
+                sub = await swReg.pushManager.subscribe({
+                    userVisibleOnly: true,
+                    applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+                });
+            }
+            const p256dh = arrayBufferToBase64Url(sub.getKey('p256dh'));
+            const auth = arrayBufferToBase64Url(sub.getKey('auth'));
+            const endpoint = sub.endpoint;
+            const expirationTime = sub.expirationTime;
+            const payload = {
+                endpoint,
+                expirationTime: expirationTime === null ? [] : [Number(expirationTime)],
+                keys: { p256dh, auth },
+            };
+            if (actorRef.current) {
+                await actorRef.current.subscribe(payload);
+                setPushStatus('subscribed');
+            } else {
+                setPushStatus('error');
+                setPushError('Backend actor not ready; try again in a moment');
+            }
+        } catch (e) {
+            console.warn('Enable push failed', e);
+            setPushStatus('error');
+            setPushError(e?.message || String(e));
+        }
+    }
+
+    async function testLocalNotification() {
+        try {
+            if (!swReady || !swReg) {
+                setPushError('Service worker not ready');
+                return;
+            }
+            if (permissionStatus !== 'granted') {
+                setPushError('Permission not granted');
+                return;
+            }
+            await swReg.showNotification('Local test', { body: 'If you see this, notifications are allowed.' });
+        } catch (e) {
+            setPushError('Local notification failed: ' + (e?.message || String(e)));
+        }
+    }
 
     // Check for room code in URL on component mount
     useEffect(() => {
@@ -403,6 +488,38 @@ function App() {
                         <button onClick={() => setCurrentView('join')} className="btn btn-secondary">
                             Join Room
                         </button>
+                    </div>
+
+                    {/* PWA / Notifications panel */}
+                    <div className="pwa-panel" style={{marginTop: '24px', padding: '12px', border: '1px solid #333', borderRadius: '8px'}}>
+                        <h3>Notifications</h3>
+                        <div style={{fontSize: '0.95em', lineHeight: 1.6}}>
+                            <div>Service Worker: {swReady ? 'ready' : 'not ready'}</div>
+                            <div>Permission: {permissionStatus}</div>
+                            <div>Push: {pushStatus}</div>
+                            {pushError && <div className="error" style={{marginTop: '8px'}}>{pushError}</div>}
+                        </div>
+                        <div className="button-group" style={{marginTop: '12px'}}>
+                            <button
+                                onClick={enablePush}
+                                className="btn btn-secondary"
+                                disabled={permissionStatus === 'granted' && pushStatus === 'subscribed'}
+                                title="Enable notifications (required on iOS via a user tap)"
+                            >
+                                {permissionStatus === 'granted' && pushStatus === 'subscribed' ? 'Notifications enabled' : 'Enable notifications'}
+                            </button>
+                            <button
+                                onClick={testLocalNotification}
+                                className="btn"
+                                disabled={!swReady || permissionStatus !== 'granted'}
+                                title="Show a local test notification"
+                            >
+                                Test local notification
+                            </button>
+                        </div>
+                        <div style={{marginTop: '8px', fontSize: '0.9em', opacity: 0.8}}>
+                            Tip: On iOS, install from Safari via Share → Add to Home Screen, then open the app icon and tap “Enable notifications”.
+                        </div>
                     </div>
                 </div>
             </div>
