@@ -7,7 +7,6 @@ import Array "mo:base/Array";
 import _Option "mo:base/Option";
 import _Result "mo:base/Result";
 import HashMap "mo:base/HashMap";
-import Iter "mo:base/Iter";
 import Principal "mo:base/Principal";
 import _Debug "mo:base/Debug";
 import Nat "mo:base/Nat";
@@ -19,9 +18,7 @@ import NotificationCanister "./notification_canister";
 persistent actor canChatBackend {
   // Types
   public type RoomCode = Text;
-  public type SessionId = Text;
   public type User = {
-    sessionId : SessionId;
     principal : Principal;
     displayName : Text;
     joinedAt : Int;
@@ -29,7 +26,7 @@ persistent actor canChatBackend {
 
   public type Message = {
     id : Nat;
-    sender : SessionId;
+    sender : Principal;
     senderName : Text;
     content : Text;
     timestamp : Int;
@@ -37,7 +34,7 @@ persistent actor canChatBackend {
 
   public type Room = {
     code : RoomCode;
-    creator : SessionId;
+    creator : Principal;
     participants : [User];
     messages : [Message];
     createdAt : Int;
@@ -45,12 +42,12 @@ persistent actor canChatBackend {
   };
 
   public type CreateRoomResult = {
-    #Ok : { roomCode : RoomCode; room : Room; sessionId : SessionId };
+    #Ok : { roomCode : RoomCode; room : Room };
     #Err : Text;
   };
 
   public type JoinRoomResult = {
-    #Ok : { room : Room; sessionId : SessionId };
+    #Ok : { room : Room };
     #Err : Text;
   };
 
@@ -61,7 +58,7 @@ persistent actor canChatBackend {
 
   // State - Make all counters persistent
   private flexible var rooms : HashMap.HashMap<RoomCode, Room> = HashMap.HashMap<RoomCode, Room>(10, Text.equal, Text.hash);
-  private flexible var sessions : HashMap.HashMap<SessionId, User> = HashMap.HashMap<SessionId, User>(10, Text.equal, Text.hash);
+  private flexible var usersByPrincipal : HashMap.HashMap<Principal, User> = HashMap.HashMap<Principal, User>(10, Principal.equal, Principal.hash);
   // Track how many active rooms each principal is part of (within this app)
   private flexible var principalActiveRooms : HashMap.HashMap<Principal, Nat> = HashMap.HashMap<Principal, Nat>(10, Principal.equal, Principal.hash);
   private flexible var messageIdCounter : Nat = 0;
@@ -151,26 +148,21 @@ persistent actor canChatBackend {
     code;
   };
 
-  // Helper function to generate session ID
-  private func generateSessionId() : async Text {
-    var f = Random.Finite(await Random.blob());
-    var sessionId = "";
-    var i = 0;
-    let n = alphabet.size();
-
-    while (i < 12) {
-      // Longer session ID for uniqueness
-      switch (sampleIndex(f, n)) {
-        case (?j) {
-          sessionId #= Char.toText(charAt(alphabet, j));
-          i += 1;
+  // Helper to create/get a user record for a principal
+  private func getOrCreateUser(p : Principal) : User {
+    switch (usersByPrincipal.get(p)) {
+      case (?u) { u };
+      case null {
+        userCounter += 1;
+        let u : User = {
+          principal = p;
+          displayName = "User " # Nat.toText(userCounter);
+          joinedAt = Time.now();
         };
-        case null {
-          f := Random.Finite(await Random.blob());
-        };
+        usersByPrincipal.put(p, u);
+        u;
       };
     };
-    sessionId;
   };
 
   // Helper function to check if room exists and is valid
@@ -188,19 +180,11 @@ persistent actor canChatBackend {
   private func cleanupExpiredRooms() : async* () {
     let now = Time.now();
     let expiredRooms = Buffer.Buffer<RoomCode>(0);
-    let expiredSessions = Buffer.Buffer<SessionId>(0);
 
     // Clean up expired rooms
     for ((code, room) in rooms.entries()) {
       if (now - room.lastActivity > SESSION_TIMEOUT) {
         expiredRooms.add(code);
-      };
-    };
-
-    // Clean up expired sessions
-    for ((sessionId, user) in sessions.entries()) {
-      if (now - user.joinedAt > SESSION_TIMEOUT) {
-        expiredSessions.add(sessionId);
       };
     };
 
@@ -210,28 +194,11 @@ persistent actor canChatBackend {
         case null {};
       };
     };
-
-    for (sessionId in expiredSessions.vals()) {
-      sessions.delete(sessionId);
-    };
   };
 
-  // Helper function to create or get user
-  private func createOrGetUser(sessionId : SessionId, principal : Principal) : User {
-    switch (sessions.get(sessionId)) {
-      case (?user) { user };
-      case null {
-        userCounter += 1; // Increment user counter
-        let user : User = {
-          sessionId = sessionId;
-          principal = principal;
-          displayName = "User " # Nat.toText(userCounter); // Use sequential numbering
-          joinedAt = Time.now();
-        };
-        sessions.put(sessionId, user);
-        user;
-      };
-    };
+  // Helper: find user in a room by principal
+  private func findUserByPrincipal(participants : [User], p : Principal) : ?User {
+    Array.find<User>(participants, func(u) = u.principal == p);
   };
 
   // track active room membership counts per principal
@@ -269,8 +236,7 @@ persistent actor canChatBackend {
   public shared (msg) func createRoom() : async CreateRoomResult {
     await* cleanupExpiredRooms();
 
-    let sessionId = await generateSessionId();
-    let user = createOrGetUser(sessionId, msg.caller);
+    let user = getOrCreateUser(msg.caller);
 
     var roomCode = await generateRoomCode();
     var attempts = 0;
@@ -288,7 +254,7 @@ persistent actor canChatBackend {
     let now = Time.now();
     let room : Room = {
       code = roomCode;
-      creator = sessionId;
+      creator = msg.caller;
       participants = [user];
       messages = [];
       createdAt = now;
@@ -297,7 +263,7 @@ persistent actor canChatBackend {
 
     rooms.put(roomCode, room);
     incPrincipalRooms(user.principal);
-    #Ok({ roomCode; room; sessionId });
+    #Ok({ roomCode; room });
   };
 
   public shared (msg) func joinRoom(roomCode : RoomCode) : async JoinRoomResult {
@@ -310,12 +276,12 @@ persistent actor canChatBackend {
           return #Err("Room has expired");
         };
 
-        let sessionId = await generateSessionId();
-        let user = createOrGetUser(sessionId, msg.caller);
+        let user = getOrCreateUser(msg.caller);
 
-        // Check if user is already in the room (by session ID)
-        if (Array.find<User>(room.participants, func(u) = u.sessionId == sessionId) != null) {
-          return #Ok({ room; sessionId });
+        // Check if user is already in the room (by principal)
+        switch (findUserByPrincipal(room.participants, msg.caller)) {
+          case (?_) { return #Ok({ room }) };
+          case null {};
         };
 
         // Add user to room
@@ -327,7 +293,7 @@ persistent actor canChatBackend {
 
         rooms.put(roomCode, updatedRoom);
         incPrincipalRooms(user.principal);
-        #Ok({ room = updatedRoom; sessionId });
+        #Ok({ room = updatedRoom });
       };
       case null {
         #Err("Room not found");
@@ -335,7 +301,7 @@ persistent actor canChatBackend {
     };
   };
 
-  public shared (_msg) func sendMessage(roomCode : RoomCode, sessionId : SessionId, content : Text) : async SendMessageResult {
+  public shared (msg) func sendMessage(roomCode : RoomCode, content : Text) : async SendMessageResult {
     await* cleanupExpiredRooms();
 
     switch (rooms.get(roomCode)) {
@@ -345,12 +311,12 @@ persistent actor canChatBackend {
           return #Err("Room has expired");
         };
 
-        // Check if user is in the room
-        switch (Array.find<User>(room.participants, func(u) = u.sessionId == sessionId)) {
+        // Check if user is in the room by principal
+        switch (findUserByPrincipal(room.participants, msg.caller)) {
           case (?user) {
             let message : Message = {
               id = messageIdCounter;
-              sender = sessionId;
+              sender = msg.caller;
               senderName = user.displayName;
               content = content;
               timestamp = Time.now();
@@ -406,10 +372,10 @@ persistent actor canChatBackend {
   };
 
   // Creator-only: end a room explicitly
-  public shared (_msg) func endRoom(roomCode : RoomCode, sessionId : SessionId) : async Bool {
+  public shared (msg) func endRoom(roomCode : RoomCode) : async Bool {
     switch (rooms.get(roomCode)) {
       case (?room) {
-        if (room.creator == sessionId) {
+        if (room.creator == msg.caller) {
           await* deleteRoomAndAdjust(roomCode, room);
           true;
         } else {
@@ -420,15 +386,15 @@ persistent actor canChatBackend {
     };
   };
 
-  public shared (_msg) func leaveRoom(roomCode : RoomCode, sessionId : SessionId) : async Bool {
+  public shared (msg) func leaveRoom(roomCode : RoomCode) : async Bool {
     switch (rooms.get(roomCode)) {
       case (?room) {
-        let leaving = Array.find<User>(room.participants, func(u) = u.sessionId == sessionId);
+        let leaving = findUserByPrincipal(room.participants, msg.caller);
         switch (leaving) {
           case (?u) await* decPrincipalRooms(u.principal);
           case (null) {};
         };
-        let updatedParticipants = Array.filter<User>(room.participants, func(u) = u.sessionId != sessionId);
+        let updatedParticipants = Array.filter<User>(room.participants, func(u) = u.principal != msg.caller);
 
         if (updatedParticipants.size() == 0) {
           // Delete room if no participants left
@@ -460,10 +426,6 @@ persistent actor canChatBackend {
       };
       case null { "Room not found" };
     };
-  };
-
-  public query func getAllSessions() : async [(SessionId, User)] {
-    Iter.toArray(sessions.entries());
   };
 
   // Web push subscription: front-end calls this once it gets a PushSubscription

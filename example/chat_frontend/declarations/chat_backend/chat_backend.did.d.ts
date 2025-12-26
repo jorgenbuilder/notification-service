@@ -3,22 +3,20 @@ import type { ActorMethod } from '@dfinity/agent';
 import type { IDL } from '@dfinity/candid';
 
 export type CreateRoomResult = {
-    'Ok' : { 'room' : Room, 'sessionId' : SessionId, 'roomCode' : RoomCode }
+    'Ok' : { 'room' : Room, 'roomCode' : RoomCode }
   } |
   { 'Err' : string };
-export type JoinRoomResult = {
-    'Ok' : { 'room' : Room, 'sessionId' : SessionId }
-  } |
+export type JoinRoomResult = { 'Ok' : { 'room' : Room } } |
   { 'Err' : string };
 export interface Message {
   'id' : bigint,
   'content' : string,
-  'sender' : SessionId,
+  'sender' : Principal,
   'timestamp' : bigint,
   'senderName' : string,
 }
 export interface Room {
-  'creator' : SessionId,
+  'creator' : Principal,
   'participants' : Array<User>,
   'messages' : Array<Message>,
   'code' : RoomCode,
@@ -28,7 +26,6 @@ export interface Room {
 export type RoomCode = string;
 export type SendMessageResult = { 'Ok' : Message } |
   { 'Err' : string };
-export type SessionId = string;
 export interface Subscription {
   'endpoint' : string,
   'keys' : { 'auth' : string, 'p256dh' : string },
@@ -38,19 +35,17 @@ export interface User {
   'principal' : Principal,
   'displayName' : string,
   'joinedAt' : bigint,
-  'sessionId' : SessionId,
 }
 export interface _SERVICE {
   'cleanup' : ActorMethod<[], undefined>,
   'createRoom' : ActorMethod<[], CreateRoomResult>,
-  'endRoom' : ActorMethod<[RoomCode, SessionId], boolean>,
-  'getAllSessions' : ActorMethod<[], Array<[SessionId, User]>>,
+  'endRoom' : ActorMethod<[RoomCode], boolean>,
   'getDebugInfo' : ActorMethod<[RoomCode], string>,
   'getMessages' : ActorMethod<[RoomCode], Array<Message>>,
   'getRoom' : ActorMethod<[RoomCode], [] | [Room]>,
   'joinRoom' : ActorMethod<[RoomCode], JoinRoomResult>,
-  'leaveRoom' : ActorMethod<[RoomCode, SessionId], boolean>,
-  'sendMessage' : ActorMethod<[RoomCode, SessionId, string], SendMessageResult>,
+  'leaveRoom' : ActorMethod<[RoomCode], boolean>,
+  'sendMessage' : ActorMethod<[RoomCode, string], SendMessageResult>,
   'subscribe' : ActorMethod<[Subscription], undefined>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;

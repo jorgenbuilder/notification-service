@@ -148,7 +148,6 @@ function App() {
     const [error, setError] = useState('');
     const [isCreator, setIsCreator] = useState(false);
     const [copySuccess, setCopySuccess] = useState(false);
-    const [sessionId, setSessionId] = useState('');
     const messagesEndRef = useRef(null);
     const [remainingMs, setRemainingMs] = useState(null);
     const [isExpired, setIsExpired] = useState(false);
@@ -403,6 +402,20 @@ function App() {
         }
     }, [roomCode, currentView]);
 
+    // Keep isCreator in sync with current room and my principal
+    useEffect(() => {
+        try {
+            if (room && myPrincipal) {
+                const creatorText = principalToText(room.creator);
+                setIsCreator(creatorText === myPrincipal);
+            } else {
+                setIsCreator(false);
+            }
+        } catch (_) {
+            setIsCreator(false);
+        }
+    }, [room, myPrincipal]);
+
     // Poll for new messages every 2 seconds
     useEffect(() => {
         if (currentView === 'room' && roomCode) {
@@ -461,10 +474,6 @@ function App() {
         return () => clearInterval(interval);
     }, [currentView, room]);
 
-    useEffect(() => {
-        const stored = localStorage.getItem('chat.sessionId');
-        if (stored) setSessionId(stored);
-    }, []);
 
     const handleCreateRoom = async () => {
         try {
@@ -475,10 +484,9 @@ function App() {
             if ('Ok' in result) {
                 setRoomCode(result.Ok.roomCode);
                 setRoom(result.Ok.room);
-                setSessionId(result.Ok.sessionId);
-                localStorage.setItem('chat.sessionId', result.Ok.sessionId);
                 setMessages(result.Ok.room.messages);
-                setIsCreator(true);
+                const creatorText = principalToText(result.Ok.room.creator);
+                setIsCreator(creatorText === myPrincipal);
                 setCurrentView('room');
                 setShowExpiredModal(false);
                 setIsExpired(false);
@@ -496,7 +504,7 @@ function App() {
         if (!confirmEnd) return;
         try {
             if (!actorRef.current) throw new Error('Actor not ready');
-            const ok = await actorRef.current.endRoom(roomCode, sessionId);
+            const ok = await actorRef.current.endRoom(roomCode);
             if (ok) {
                 setShowExpiredModal(true);
                 setIsExpired(true);
@@ -523,10 +531,9 @@ function App() {
             if ('Ok' in result) {
                 setRoomCode(joinCode.trim().toUpperCase());
                 setRoom(result.Ok.room);
-                setSessionId(result.Ok.sessionId);
-                localStorage.setItem('chat.sessionId', result.Ok.sessionId);
                 setMessages(result.Ok.room.messages);
-                setIsCreator(false);
+                const creatorText = principalToText(result.Ok.room.creator);
+                setIsCreator(creatorText === myPrincipal);
                 setCurrentView('room');
                 setShowExpiredModal(false);
                 setIsExpired(false);
@@ -540,11 +547,11 @@ function App() {
 
     const handleSendMessage = async (e) => {
         e.preventDefault();
-        if (!newMessage.trim() || !sessionId || isExpired) return;
+        if (!newMessage.trim() || isExpired) return;
 
         try {
             if (!actorRef.current) throw new Error('Actor not ready');
-            const result = await actorRef.current.sendMessage(roomCode, sessionId, newMessage.trim());
+            const result = await actorRef.current.sendMessage(roomCode, newMessage.trim());
 
             if ('Ok' in result) {
                 setMessages(prev => [...prev, result.Ok]);
@@ -559,21 +566,19 @@ function App() {
 
     const handleLeaveRoom = async () => {
         try {
-            if (sessionId) {
-                if (!actorRef.current) throw new Error('Actor not ready');
-                await actorRef.current.leaveRoom(roomCode, sessionId);
-            }
+            if (!actorRef.current) throw new Error('Actor not ready');
+            await actorRef.current.leaveRoom(roomCode);
+        } catch (err) {
+            console.error('Error leaving room:', err);
+        } finally {
             setCurrentView('home');
             setRoomCode('');
             setRoom(null);
             setMessages([]);
             setNewMessage('');
             setError('');
-            setIsCreator(false);
             // Clear URL parameters
             window.history.pushState({}, '', window.location.pathname);
-        } catch (err) {
-            console.error('Error leaving room:', err);
         }
     };
 
@@ -601,9 +606,13 @@ function App() {
         return date.toLocaleTimeString();
     };
 
+    const principalToText = (p) => {
+        try { return p && typeof p.toText === 'function' ? p.toText() : String(p); } catch (_) { return String(p); }
+    };
+
     const formatMessageSender = (message) => {
         // Show "You" for current user, display name for others
-        return message.sender === sessionId ? "You" : message.senderName;
+        return principalToText(message.sender) === myPrincipal ? "You" : message.senderName;
     };
 
     if (currentView === 'home') {
@@ -744,7 +753,7 @@ function App() {
                         ) : (
                             messages.map((message) => (
                                 <div key={message.id}
-                                     className={`message ${message.sender === sessionId ? 'own' : 'other'}`}>
+                                     className={`message ${principalToText(message.sender) === myPrincipal ? 'own' : 'other'}`}>
                                     <div className="message-header">
                                         <span className="sender">{formatMessageSender(message)}</span>
                                         <span className="timestamp">{formatTime(message.timestamp)}</span>
