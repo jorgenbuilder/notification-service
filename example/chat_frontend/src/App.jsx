@@ -4,6 +4,7 @@ import {canisterId, createActor} from 'declarations/chat_backend';
 import {HttpAgent} from '@dfinity/agent';
 import {Ed25519KeyIdentity} from '@dfinity/identity';
 import './index.scss';
+import LoadingButton from './components/LoadingButton';
 
 const ID_STORAGE_KEY_V2 = 'chat.identity.v2';
 const ID_STORAGE_SOURCE_KEY = 'chat.identity.source';
@@ -139,6 +140,7 @@ function arrayBufferToBase64Url(buffer) {
 function App() {
     const [actor, setActor] = useState(null);
     const actorRef = useRef(null);
+    const pendingJoinRef = useRef('');
     const [currentView, setCurrentView] = useState('home'); // 'home', 'room', 'join'
     const [roomCode, setRoomCode] = useState('');
     const [joinCode, setJoinCode] = useState('');
@@ -152,6 +154,10 @@ function App() {
     const [remainingMs, setRemainingMs] = useState(null);
     const [isExpired, setIsExpired] = useState(false);
     const [showExpiredModal, setShowExpiredModal] = useState(false);
+    // Loading states
+    const [isCreating, setIsCreating] = useState(false);
+    const [isJoining, setIsJoining] = useState(false);
+    const [isSending, setIsSending] = useState(false);
 
     // PWA / Push state
     const [swReady, setSwReady] = useState(false);
@@ -380,19 +386,31 @@ function App() {
         }
     }
 
-    // Check for room code in URL on component mount
+    // Check for room code in URL on component mount and auto-join deterministically
     useEffect(() => {
         const urlParams = new URLSearchParams(window.location.search);
         const refId = urlParams.get('refID');
         if (refId && refId.length === 6) {
-            setJoinCode(refId.toUpperCase());
+            const code = refId.toUpperCase();
+            setJoinCode(code);
             setCurrentView('join');
-            // Auto-join the room
-            setTimeout(() => {
-                handleJoinRoom();
-            }, 100);
+            if (actorRef.current) {
+                handleJoinRoom(code, { silent: true });
+            } else {
+                // Defer until actor is ready
+                pendingJoinRef.current = code;
+            }
         }
     }, []);
+
+    // When backend actor becomes ready, perform any pending auto-join
+    useEffect(() => {
+        if (actorRef.current && pendingJoinRef.current) {
+            const code = pendingJoinRef.current;
+            pendingJoinRef.current = '';
+            handleJoinRoom(code, { silent: true });
+        }
+    }, [actor]);
 
     // Update URL when room code changes
     useEffect(() => {
@@ -476,6 +494,8 @@ function App() {
 
 
     const handleCreateRoom = async () => {
+        if (isCreating) return;
+        setIsCreating(true);
         try {
             setError('');
             if (!actorRef.current) throw new Error('Actor not ready');
@@ -495,6 +515,8 @@ function App() {
             }
         } catch (err) {
             setError('Failed to create room: ' + err.message);
+        } finally {
+            setIsCreating(false);
         }
     };
 
@@ -516,20 +538,28 @@ function App() {
         }
     };
 
-    const handleJoinRoom = async () => {
-        if (!joinCode.trim()) {
-            setError('Please enter a room code');
+    const handleJoinRoom = async (codeArg = null, options = { silent: false }) => {
+        if (isJoining) return;
+        setIsJoining(true);
+        const codeRaw = (typeof codeArg === 'string' && codeArg ? codeArg : joinCode).trim().toUpperCase();
+        if (!codeRaw) {
+            if (!options?.silent) setError('Please enter a room code');
+            setIsJoining(false);
+            return;
+        }
+        if (codeRaw.length !== 6) {
+            if (!options?.silent) setError('Room code must be 6 characters');
+            setIsJoining(false);
             return;
         }
 
         try {
-            setError('');
-            const code = joinCode.trim().toUpperCase();
+            if (!options?.silent) setError('');
             if (!actorRef.current) throw new Error('Actor not ready');
-            const result = await actorRef.current.joinRoom(code);
+            const result = await actorRef.current.joinRoom(codeRaw);
 
             if ('Ok' in result) {
-                setRoomCode(joinCode.trim().toUpperCase());
+                setRoomCode(codeRaw);
                 setRoom(result.Ok.room);
                 setMessages(result.Ok.room.messages);
                 const creatorText = principalToText(result.Ok.room.creator);
@@ -542,12 +572,16 @@ function App() {
             }
         } catch (err) {
             setError('Failed to join room: ' + err.message);
+        } finally {
+            setIsJoining(false);
         }
     };
 
     const handleSendMessage = async (e) => {
         e.preventDefault();
+        if (isSending) return;
         if (!newMessage.trim() || isExpired) return;
+        setIsSending(true);
 
         try {
             if (!actorRef.current) throw new Error('Actor not ready');
@@ -561,6 +595,8 @@ function App() {
             }
         } catch (err) {
             setError('Failed to send message: ' + err.message);
+        } finally {
+            setIsSending(false);
         }
     };
 
@@ -625,9 +661,9 @@ function App() {
                     {error && <div className="error">{error}</div>}
 
                     <div className="button-group">
-                        <button onClick={handleCreateRoom} className="btn btn-primary">
+                        <LoadingButton onClick={handleCreateRoom} className="btn btn-primary" isLoading={isCreating}>
                             Create Room
-                        </button>
+                        </LoadingButton>
                         <button onClick={() => setCurrentView('join')} className="btn btn-secondary">
                             Join Room
                         </button>
@@ -693,9 +729,9 @@ function App() {
                             maxLength="6"
                             className="room-code-input"
                         />
-                        <button onClick={handleJoinRoom} className="btn btn-primary">
+                        <LoadingButton onClick={handleJoinRoom} className="btn btn-primary" isLoading={isJoining}>
                             Join
-                        </button>
+                        </LoadingButton>
                     </div>
 
                     <button onClick={() => setCurrentView('home')} className="btn btn-link">
@@ -772,11 +808,11 @@ function App() {
                             onChange={(e) => setNewMessage(e.target.value)}
                             placeholder="Type your message..."
                             className="message-input"
-                            disabled={isExpired}
+                            disabled={isExpired || isSending}
                         />
-                        <button type="submit" className="btn btn-primary" disabled={isExpired}>
+                        <LoadingButton type="submit" className="btn btn-primary" isLoading={isSending} disabled={isExpired}>
                             Send
-                        </button>
+                        </LoadingButton>
                     </form>
                     {showExpiredModal && createPortal(
                         (

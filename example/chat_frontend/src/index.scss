@@ -521,3 +521,45 @@ p {
 }
 
 }
+
+/* LoadingButton spinner styles */
+.btn.is-loading {
+  position: relative;
+  pointer-events: none;
+  opacity: 0.9;
+}
+
+.btn .spinner {
+  width: 1em;
+  height: 1em;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  display: inline-block;
+  animation: spin 0.8s linear infinite;
+  margin-right: 0.5em;
+  vertical-align: -0.2em;
+}
+
+/* Adapt spinner color for secondary/neutral buttons */
+.btn.btn-secondary .spinner,
+.btn.btn-link .spinner {
+  border-color: rgba(0, 0, 0, 0.2);
+  border-top-color: currentColor;
+}
+
+/* Smaller spinner for .btn-small */
+.btn.btn-small .spinner {
+  width: 0.9em;
+  height: 0.9em;
+  border-width: 2px;
+  margin-right: 0.4em;
+}
+
+.btn .btn-label {
+  display: inline-block;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
