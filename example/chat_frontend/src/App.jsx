@@ -2,9 +2,12 @@ import {useEffect, useRef, useState} from 'react';
 import {createPortal} from 'react-dom';
 import {canisterId, createActor} from 'declarations/chat_backend';
 import {HttpAgent} from '@dfinity/agent';
-import {AuthClient} from '@dfinity/auth-client';
+import {Ed25519KeyIdentity} from '@dfinity/identity';
 import './index.scss';
 import LoadingButton from './components/LoadingButton';
+
+const ID_STORAGE_KEY_V2 = 'chat.identity.v2';
+const ID_STORAGE_SOURCE_KEY = 'chat.identity.source';
 
 // Simple IndexedDB helpers
 function openIdb() {
@@ -179,83 +182,42 @@ function App() {
         scrollToBottom();
     }, [messages]);
 
-    // Internet Identity (II) 2.0 auth bootstrap
-    const [authReady, setAuthReady] = useState(false);
-    const [isAuthenticated, setIsAuthenticated] = useState(false);
-    const authClientRef = useRef(null);
-
-    async function initActorWithIdentity(identity) {
-        try {
-            if (!identity) throw new Error('No identity');
-            setMyPrincipal(identity.getPrincipal().toText());
-            const agent = new HttpAgent({ identity });
-            if (import.meta && import.meta.env && import.meta.env.MODE !== 'production') {
-                try { await agent.fetchRootKey(); } catch (e) { console.warn('fetchRootKey failed', e); }
-            } else if (typeof process !== 'undefined' && process.env && process.env.DFX_NETWORK !== 'ic') {
-                try { await agent.fetchRootKey(); } catch (e) { console.warn('fetchRootKey failed', e); }
-            }
-            const a = createActor(canisterId, { agent });
-            actorRef.current = a;
-            setActor(a);
-            setIdStorageSource('Internet Identity');
-            setIdStorageError('');
-        } catch (e) {
-            console.error('Failed to init actor with identity', e);
-            setIdStorageError((prev) => prev ? prev + ' | ' + (e?.message || String(e)) : (e?.message || String(e)));
-        }
-    }
-
     useEffect(() => {
         (async () => {
             try {
-                const client = await AuthClient.create();
-                authClientRef.current = client;
-                const authed = await client.isAuthenticated();
-                setIsAuthenticated(!!authed);
-                setAuthReady(true);
-                if (authed) {
-                    const identity = client.getIdentity();
-                    await initActorWithIdentity(identity);
+                const identity = await getOrCreateIdentity((diag) => {
+                    if (!diag) return;
+                    if (diag.source) setIdStorageSource(diag.source);
+                    if (diag.error) setIdStorageError(diag.error);
+                });
+                try {
+                    setMyPrincipal(identity.getPrincipal().toText());
+                } catch (_) {
+                    // ignore
                 }
+                const agent = new HttpAgent({identity});
+                if (import.meta && import.meta.env && import.meta.env.MODE !== 'production') {
+                    try {
+                        await agent.fetchRootKey();
+                    } catch (e) {
+                        console.warn('fetchRootKey failed', e);
+                    }
+                } else if (typeof process !== 'undefined' && process.env && process.env.DFX_NETWORK !== 'ic') {
+                    try {
+                        await agent.fetchRootKey();
+                    } catch (e) {
+                        console.warn('fetchRootKey failed', e);
+                    }
+                }
+                const a = createActor(canisterId, {agent});
+                actorRef.current = a;
+                setActor(a);
             } catch (e) {
-                console.error('AuthClient init failed', e);
-                setIdStorageError((prev) => prev ? prev + ' | Auth init: ' + (e?.message || String(e)) : 'Auth init: ' + (e?.message || String(e)));
-                setAuthReady(true);
+                console.error('Failed to init identity/actor', e);
+                setIdStorageError((prev) => prev ? prev + ' | ' + (e?.message || String(e)) : (e?.message || String(e)));
             }
         })();
     }, []);
-
-    const handleLogin = async () => {
-        const client = authClientRef.current;
-        if (!client) return;
-        try {
-            await client.login({
-                identityProvider: "https://id.ai",
-                onSuccess: async () => {
-                    setIsAuthenticated(true);
-                    const identity = client.getIdentity();
-                    await initActorWithIdentity(identity);
-                },
-                onError: (err) => {
-                    const msg = typeof err === 'string' ? err : (err?.message || String(err));
-                    setIdStorageError((prev) => prev ? prev + ' | Login error: ' + msg : 'Login error: ' + msg);
-                },
-            });
-        } catch (e) {
-            setIdStorageError((prev) => prev ? prev + ' | Login failed: ' + (e?.message || String(e)) : 'Login failed: ' + (e?.message || String(e)));
-        }
-    };
-
-    const handleLogout = async () => {
-        const client = authClientRef.current;
-        try {
-            await client?.logout();
-        } catch (_) {}
-        setIsAuthenticated(false);
-        setMyPrincipal('');
-        actorRef.current = null;
-        setActor(null);
-    };
 
     // Register Service Worker on first load (no permission request on iOS without user gesture)
     useEffect(() => {
@@ -698,32 +660,11 @@ function App() {
 
                     {error && <div className="error">{error}</div>}
 
-                    {/* Auth panel */}
-                    <div className="pwa-panel" style={{marginTop: '12px', padding: '12px', border: '1px solid #333', borderRadius: '8px'}}>
-                        <h3>Authentication</h3>
-                        <div style={{fontSize: '0.95em', lineHeight: 1.6}}>
-                            <div>Status: {authReady ? (isAuthenticated ? 'Signed in' : 'Signed out') : 'Initializing…'}</div>
-                            <div>Principal: {myPrincipal || '—'}</div>
-                            {idStorageError && <div className="error" style={{marginTop: '8px'}}>Auth error: {idStorageError}</div>}
-                        </div>
-                        <div className="button-group" style={{marginTop: '12px'}}>
-                            {!isAuthenticated ? (
-                                <button onClick={handleLogin} className="btn btn-primary" disabled={!authReady}>
-                                    Sign in with Internet Identity
-                                </button>
-                            ) : (
-                                <button onClick={handleLogout} className="btn btn-secondary">
-                                    Sign out
-                                </button>
-                            )}
-                        </div>
-                    </div>
-
-                    <div className="button-group" style={{marginTop: '16px'}}>
-                        <LoadingButton onClick={handleCreateRoom} className="btn btn-primary" isLoading={isCreating} disabled={!isAuthenticated || !actor}>
+                    <div className="button-group">
+                        <LoadingButton onClick={handleCreateRoom} className="btn btn-primary" isLoading={isCreating}>
                             Create Room
                         </LoadingButton>
-                        <button onClick={() => setCurrentView('join')} className="btn btn-secondary" disabled={!isAuthenticated || !actor}>
+                        <button onClick={() => setCurrentView('join')} className="btn btn-secondary">
                             Join Room
                         </button>
                     </div>
