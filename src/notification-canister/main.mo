@@ -11,7 +11,7 @@ import HTTP "./http";
 
 persistent actor class NotificationCanister(worker : Principal) = self {
 
-  let CONST = {
+  transient let CONST = {
     vapidPublicKey = "BHwsFW3GXWkq7v0U_QM3yF43-4U8bjn0Nfdc3tl4BuX3CkzZv9T3df84QHB8PABj5m34y3YRByQfHgC_uHNFYQ4";
   };
 

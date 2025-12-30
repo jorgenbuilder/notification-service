@@ -375,30 +375,58 @@ function App() {
                 setPushError('Notification permission not granted');
                 return;
             }
-            let sub = await swReg.pushManager.getSubscription();
-            if (!sub) {
-                let key = vapidPublicKey;
-                if (!key || key.length === 0) {
-                    try {
-                        if (notificationsActorRef.current) {
-                            const fetched = await notificationsActorRef.current.getVapidPublicKey();
-                            if (typeof fetched === 'string' && fetched.length > 0) {
-                                key = fetched;
-                                setVapidPublicKey(fetched);
-                            }
+
+            let currentKey = vapidPublicKey;
+            if (!currentKey || currentKey.length === 0) {
+                try {
+                    if (notificationsActorRef.current) {
+                        const fetched = await notificationsActorRef.current.getVapidPublicKey();
+                        if (typeof fetched === 'string' && fetched.length > 0) {
+                            currentKey = fetched;
+                            setVapidPublicKey(fetched);
                         }
-                    } catch (_) { /* ignore; will error below if still missing */ }
-                }
-                if (!key || key.length === 0) {
-                    setPushStatus('error');
-                    setPushError('VAPID public key not available yet. Please try again in a moment.');
-                    return;
-                }
-                sub = await swReg.pushManager.subscribe({
-                    userVisibleOnly: true,
-                    applicationServerKey: urlBase64ToUint8Array(key),
-                });
+                    }
+                } catch (_) { /* ignore; will error below if still missing */ }
             }
+            if (!currentKey || currentKey.length === 0) {
+                setPushStatus('error');
+                setPushError('VAPID public key not available yet. Please try again in a moment.');
+                return;
+            }
+
+            const LAST_VAPID_KEY_STORAGE = 'chat.lastVapidPublicKey';
+            const doSubscribe = async () => {
+                return await swReg.pushManager.subscribe({
+                    userVisibleOnly: true,
+                    applicationServerKey: urlBase64ToUint8Array(currentKey),
+                });
+            };
+
+            let sub = null;
+            try {
+                sub = await doSubscribe();
+            } catch (e1) {
+                const msg = e1?.message || '';
+                if (e1?.name === 'InvalidStateError' || msg.includes('different applicationServerKey')) {
+                    try {
+                        const existing = await swReg.pushManager.getSubscription();
+                        if (existing) {
+                            try { await existing.unsubscribe(); } catch (_) {}
+                        }
+                    } catch (_) {}
+                    sub = await doSubscribe();
+                } else {
+                    const existing = await swReg.pushManager.getSubscription();
+                    if (existing) {
+                        sub = existing;
+                    } else {
+                        throw e1;
+                    }
+                }
+            }
+
+            try { localStorage.setItem(LAST_VAPID_KEY_STORAGE, currentKey); } catch (_) {}
+
             const p256dh = arrayBufferToBase64Url(sub.getKey('p256dh'));
             const auth = arrayBufferToBase64Url(sub.getKey('auth'));
             const endpoint = sub.endpoint;
@@ -410,6 +438,7 @@ function App() {
             };
             if (notificationsActorRef.current) {
                 await notificationsActorRef.current.subscribe(Principal.fromText(chatCanisterId), payload);
+                try { localStorage.setItem('chat.lastPushEndpoint', endpoint); } catch (_) {}
                 setPushStatus('subscribed');
             } else {
                 setPushStatus('error');
@@ -418,6 +447,43 @@ function App() {
         } catch (e) {
             console.warn('Enable push failed', e);
             setPushStatus('error');
+            setPushError(e?.message || String(e));
+        }
+    }
+
+    async function disablePush() {
+        try {
+            setPushError('');
+            let sub = null;
+            if (swReg) {
+                try {
+                    sub = await swReg.pushManager.getSubscription();
+                } catch (_) {
+                    // pass
+                }
+            }
+            let endpoint = null;
+            if (sub && sub.endpoint) endpoint = sub.endpoint;
+            if (!endpoint) {
+                try { endpoint = localStorage.getItem('chat.lastPushEndpoint') || null; } catch (_) {}
+            }
+
+            if (endpoint && notificationsActorRef.current) {
+                try {
+                    await notificationsActorRef.current.unsubscribe(Principal.fromText(chatCanisterId), endpoint);
+                } catch (e) {
+                    setPushError('Backend unsubscribe failed: ' + (e?.message || String(e)));
+                }
+            }
+
+            if (sub) {
+                try { await sub.unsubscribe(); } catch (_) {}
+            }
+
+            try { localStorage.removeItem('chat.lastPushEndpoint'); } catch (_) {}
+
+            setPushStatus('idle');
+        } catch (e) {
             setPushError(e?.message || String(e));
         }
     }
@@ -751,6 +817,14 @@ function App() {
                                 title="Enable notifications (required on iOS via a user tap)"
                             >
                                 {permissionStatus === 'granted' && pushStatus === 'subscribed' ? 'Notifications enabled' : 'Enable notifications'}
+                            </button>
+                            <button
+                                onClick={disablePush}
+                                className="btn btn-warning"
+                                disabled={pushStatus !== 'subscribed'}
+                                title="Disable notifications and unregister on server"
+                            >
+                                Disable notifications
                             </button>
                             <button
                                 onClick={testLocalNotification}
