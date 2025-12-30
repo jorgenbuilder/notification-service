@@ -1,7 +1,6 @@
 import Error "mo:core/Error";
 import List "mo:core/List";
 import Map "mo:core/Map";
-import Prim "mo:prim";
 import Principal "mo:core/Principal";
 import Text "mo:core/Text";
 import Queue "mo:core/Queue";
@@ -12,9 +11,12 @@ import HTTP "./http";
 
 persistent actor class NotificationCanister(worker : Principal) = self {
 
+  let CONST = {
+    vapidPublicKey = "BHwsFW3GXWkq7v0U_QM3yF43-4U8bjn0Nfdc3tl4BuX3CkzZv9T3df84QHB8PABj5m34y3YRByQfHgC_uHNFYQ4";
+  };
+
   type Application = {
     manager : Principal;
-    var vapid : ?Vapid;
     subscriptions : Map.Map<Principal, List.List<Subscription>>;
   };
 
@@ -41,17 +43,11 @@ persistent actor class NotificationCanister(worker : Principal) = self {
 
   type Notification = {
     subscription : Subscription;
-    vapid : Vapid;
     body : NotificationBody;
   };
 
   let applications : Map.Map<Principal, Application> = Map.empty();
   let notificationsQueue : Queue.Queue<Notification> = Queue.empty();
-
-  private func getApplication(caller : Principal) : Application {
-    let ?app = Map.get(applications, Principal.compare, caller) else Prim.trap("Caller does not have any application registered");
-    app;
-  };
 
   var ptData : PT.StableData = null;
   transient let pt = PT.PromTracker("", 65);
@@ -76,6 +72,59 @@ persistent actor class NotificationCanister(worker : Principal) = self {
     };
   };
 
+  // end user interface
+  public query func getVapidPublicKey() : async Text = async CONST.vapidPublicKey;
+
+  public shared ({ caller }) func subscribe(application : Principal, subscription : Subscription) {
+    let ?app = Map.get(applications, Principal.compare, application) else throw Error.reject("Application not found");
+    switch (Map.get(app.subscriptions, Principal.compare, caller)) {
+      case (?list) {
+        switch (List.findIndex<Subscription>(list, func(item) = item.endpoint == subscription.endpoint)) {
+          case (?idx) List.put<Subscription>(list, idx, subscription);
+          case (null) {
+            List.add(list, subscription);
+            subscriptionsCount.add(1);
+          };
+        };
+      };
+      case (null) {
+        let l = List.fromArray<Subscription>([subscription]);
+        Map.add(app.subscriptions, Principal.compare, caller, l);
+        subscriptionsCount.add(1);
+      };
+    };
+  };
+
+  public shared ({ caller }) func unsubscribe(application : Principal, endpoint : Text) {
+    let ?app = Map.get(applications, Principal.compare, application) else throw Error.reject("Application not found");
+    switch (Map.get(app.subscriptions, Principal.compare, caller)) {
+      case (?list) {
+        let listUpd = List.filter(list, func(item) = item.endpoint != endpoint);
+        if (List.isEmpty(listUpd)) {
+          Map.remove(app.subscriptions, Principal.compare, caller);
+        } else {
+          Map.add(app.subscriptions, Principal.compare, caller, listUpd);
+        };
+        subscriptionsCount.sub(List.size(list) - List.size(listUpd));
+      };
+      case (null) {};
+    };
+  };
+
+  public shared ({ caller }) func unsubscribeAll(application : Principal) {
+    let ?app = Map.get(applications, Principal.compare, application) else throw Error.reject("Application not found");
+    switch (Map.get(app.subscriptions, Principal.compare, caller)) {
+      case (?list) {
+        Map.remove(app.subscriptions, Principal.compare, caller);
+        let count = List.size(list);
+        if (count > 0) {
+          subscriptionsCount.sub(count);
+        };
+      };
+      case (null) {};
+    };
+  };
+
   // admin interface
   public shared ({ caller }) func registerApplication(manager : Principal) {
     if (not Principal.isController(caller)) {
@@ -86,7 +135,6 @@ persistent actor class NotificationCanister(worker : Principal) = self {
     };
     let app : Application = {
       manager;
-      var vapid = null;
       subscriptions = Map.empty();
     };
     Map.add(applications, Principal.compare, manager, app);
@@ -106,70 +154,15 @@ persistent actor class NotificationCanister(worker : Principal) = self {
   };
 
   // app owner interface
-  public shared ({ caller }) func updateApplication(vapid : Vapid) {
-    let app = getApplication(caller);
-    app.vapid := ?vapid;
-  };
-
-  public shared ({ caller }) func subscribe(user : Principal, subscription : Subscription) {
-    let app = getApplication(caller);
-    let _ = ?app.vapid else throw Error.reject("Vapid is not configured");
-    switch (Map.get(app.subscriptions, Principal.compare, user)) {
-      case (?list) {
-        switch (List.find<Subscription>(list, func(item) = item.endpoint == subscription.endpoint)) {
-          case (?_) {};
-          case (null) {
-            List.add(list, subscription);
-            subscriptionsCount.add(1);
-          };
-        };
-      };
-      case (null) {
-        let l = List.fromArray<Subscription>([subscription]);
-        Map.add(app.subscriptions, Principal.compare, user, l);
-        subscriptionsCount.add(1);
-      };
-    };
-  };
-
-  public shared ({ caller }) func unsubscribe(user : Principal, endpoint : Text) {
-    let app = getApplication(caller);
-    switch (Map.get(app.subscriptions, Principal.compare, user)) {
-      case (?list) {
-        let listUpd = List.filter(list, func(item) = item.endpoint != endpoint);
-        if (List.isEmpty(listUpd)) {
-          Map.remove(app.subscriptions, Principal.compare, user);
-        } else {
-          Map.add(app.subscriptions, Principal.compare, user, listUpd);
-        };
-        subscriptionsCount.sub(List.size(list) - List.size(listUpd));
-      };
-      case (null) {};
-    };
-  };
-
-  public shared ({ caller }) func unsubscribeAll(user : Principal) {
-    let app = getApplication(caller);
-    switch (Map.get(app.subscriptions, Principal.compare, user)) {
-      case (?list) {
-        Map.remove(app.subscriptions, Principal.compare, user);
-        let count = List.size(list);
-        if (count > 0) {
-          subscriptionsCount.sub(count);
-        };
-      };
-      case (null) {};
-    };
-  };
-
-  public shared ({ caller }) func sendNotification(user : Principal, body : NotificationBody) {
-    let app = getApplication(caller);
-    let ?vapid = app.vapid else throw Error.reject("Vapid is not configured");
-    let ?userSubscriptions = Map.get(app.subscriptions, Principal.compare, user) else return;
+  public shared ({ caller }) func sendNotification(user : Principal, body : NotificationBody) : async Nat {
+    let ?app = Map.get(applications, Principal.compare, caller) else throw Error.reject("Caller does not have any application registered");
+    let ?userSubscriptions = Map.get(app.subscriptions, Principal.compare, user) else return 0;
     for (subscription in List.values(userSubscriptions)) {
-      Queue.pushBack(notificationsQueue, { subscription; vapid; body });
+      Queue.pushBack(notificationsQueue, { subscription; body });
     };
-    totalMessages.add(List.size(userSubscriptions));
+    let sentNotifications = List.size(userSubscriptions);
+    totalMessages.add(sentNotifications);
+    sentNotifications;
   };
 
   // worker interface

@@ -10,8 +10,6 @@ import HashMap "mo:base/HashMap";
 import Principal "mo:base/Principal";
 import _Debug "mo:base/Debug";
 import Nat "mo:base/Nat";
-import Timer "mo:base/Timer";
-import Error "mo:base/Error";
 
 import NotificationCanister "./notification_canister";
 
@@ -67,24 +65,6 @@ persistent actor canChatBackend {
   private let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
   transient let Notifications = NotificationCanister.getActor();
-  transient var notificationsEnabled = false;
-  ignore Timer.setTimer<system>(
-    #seconds(0),
-    func() : async () {
-      try {
-        _Debug.print("Notification app initialization.....");
-        await Notifications.updateApplication({
-          subject = "mailto:andy.gura@trembit.com";
-          publicKey = "BK2eDWyXNMc9gwVd5vRCR8cNz2hgEE0vaUvH50LhtuCfj2v73P15taeCzSXEuSMlKeBmXO0Akyd4TN9DO-R9hDM";
-          privateKey = "M_HarH9h33L5V8n35taC_LFMsYP4rEi0U-xWXuqnbxc";
-        });
-        _Debug.print("Notification app initialized successfully");
-        notificationsEnabled := true;
-      } catch (err) {
-        _Debug.print("Notification app initialization failed: " # Error.message(err));
-      };
-    },
-  );
 
   // Migration function to handle upgrade
   system func preupgrade() {
@@ -214,9 +194,6 @@ persistent actor canChatBackend {
       case (?n) {
         if (n <= 1) {
           principalActiveRooms.delete(p);
-          if (notificationsEnabled) {
-            ignore Notifications.unsubscribeAll(p);
-          };
         } else {
           principalActiveRooms.put(p, n - 1);
         };
@@ -333,17 +310,15 @@ persistent actor canChatBackend {
             rooms.put(roomCode, updatedRoom);
 
             // Fire-and-forget push notifications to other participants
-            if (notificationsEnabled) {
-              let body : NotificationCanister.NotificationBody = {
-                title = user.displayName # " in room " # roomCode;
-                content = content;
-                url = ?("/?refID=" # roomCode);
-              };
-              // Notify all participants except the sender (by principal)
-              for (u in Array.vals<User>(room.participants)) {
-                if (u.principal != user.principal) {
-                  ignore Notifications.sendNotification(u.principal, body);
-                };
+            let body : NotificationCanister.NotificationBody = {
+              title = user.displayName # " in room " # roomCode;
+              content = content;
+              url = ?("/?refID=" # roomCode);
+            };
+            // Notify all participants except the sender (by principal)
+            for (u in Array.vals<User>(room.participants)) {
+              if (u.principal != user.principal) {
+                ignore Notifications.sendNotification(u.principal, body);
               };
             };
 
@@ -425,15 +400,6 @@ persistent actor canChatBackend {
         "Message Counter: " # Nat.toText(messageIdCounter);
       };
       case null { "Room not found" };
-    };
-  };
-
-  // Web push subscription: front-end calls this once it gets a PushSubscription
-  public shared ({ caller }) func subscribe(subscription : NotificationCanister.Subscription) : async () {
-    if (notificationsEnabled) {
-      try {
-        await Notifications.subscribe(caller, subscription);
-      } catch (_) {};
     };
   };
 

@@ -1,12 +1,31 @@
 import 'dotenv/config';
 import { Actor, HttpAgent } from '@dfinity/agent';
 import { Ed25519KeyIdentity } from '@dfinity/identity';
-import { RequestOptions, sendNotification } from 'web-push';
+import { sendNotification } from 'web-push';
 
 export interface Env {
   IC_HOST: string;
   NOTIFICATION_CANISTER_ID: string;
+  VAPID_SUBJECT: string;
+  VAPID_PUBLIC_KEY: string;
   WORKER_ED25519_SECRET_KEY: string;
+  VAPID_PRIVATE_KEY: string;
+}
+
+type CanNotification = {
+  subscription: {
+    endpoint: string;
+    expirationTime: [number] | [];
+    keys: {
+      p256dh: string;
+      auth: string;
+    };
+  };
+  body: {
+    title: string;
+    content: string;
+    url: [string] | [];
+  }
 }
 
 const idlFactory = ({ IDL }: { IDL: typeof import('@dfinity/candid').IDL }) => {
@@ -17,11 +36,9 @@ const idlFactory = ({ IDL }: { IDL: typeof import('@dfinity/candid').IDL }) => {
     expirationTime: IDL.Opt(Nat),
     keys: IDL.Record({ p256dh: Text, auth: Text }),
   });
-  const Vapid = IDL.Record({ subject: Text, publicKey: Text, privateKey: Text });
   const NotificationBody = IDL.Record({ title: Text, content: Text, url: IDL.Opt(Text) });
   const Notification = IDL.Record({
     subscription: Subscription,
-    vapid: Vapid,
     body: NotificationBody,
   });
   return IDL.Service({
@@ -43,43 +60,38 @@ function identityFromBase64Secret(b64: string): Ed25519KeyIdentity {
   return Ed25519KeyIdentity.fromSecretKey(raw);
 }
 
-async function sendWebPushBatch(notifications: any[], env: Env) {
+async function sendWebPushBatch(notifications: CanNotification[], env: Env) {
   log('Preparing to send web-push batch:', notifications.length);
   const tasks = notifications.map(async (n, i) => {
-    const endpoint = n.subscription?.endpoint || '';
+    const endpoint = n.subscription.endpoint;
     log('Sending notification', i + 1, 'to', redact(endpoint, 16));
 
-    const subscription = {
-      endpoint,
-      expirationTime: n.subscription.expirationTime ?? null,
-      keys: {
-        p256dh: n.subscription.keys.p256dh,
-        auth: n.subscription.keys.auth,
+    const result = await sendNotification(
+      {
+        endpoint,
+        expirationTime: n.subscription.expirationTime.length ? n.subscription.expirationTime[0] : null,
+        keys: {
+          p256dh: n.subscription.keys.p256dh,
+          auth: n.subscription.keys.auth,
+        },
       },
-    } as const;
-
-    const url: string | null = Array.isArray(n?.body?.url) ? n.body.url[0] : null;
-    const payload = JSON.stringify({
-      title: n.body?.title,
-      body: n.body?.content,
-      url,
-    });
-
-    const vapidDetails = {
-      subject: n.vapid.subject,
-      publicKey: String(n.vapid.publicKey).trim(),
-      privateKey: String(n.vapid.privateKey).trim(),
-    };
-
-    const options: RequestOptions = {
-      TTL: 60 * 60, // 1 hour
-      vapidDetails,
-      headers: {
-        Urgency: 'normal',
-      },
-    };
-
-    const result = await sendNotification(subscription as any, payload, options);
+      JSON.stringify({
+        title: n.body.title,
+        body: n.body.content,
+        url: n.body.url.length ? n.body.url[0] : undefined
+      }),
+      {
+        TTL: 60 * 60, // 1 hour
+        vapidDetails: {
+          subject: env.VAPID_SUBJECT,
+          publicKey: env.VAPID_PUBLIC_KEY,
+          privateKey: env.VAPID_PRIVATE_KEY,
+        },
+        headers: {
+          Urgency: 'normal',
+        },
+      }
+    );
     const status = result.statusCode ?? 0;
     if (!(status >= 200 && status < 300)) {
       const text = (result.body && typeof result.body === 'string') ? result.body : '';
@@ -155,7 +167,10 @@ function loadEnv(): Env {
   return {
     IC_HOST: process.env.IC_HOST || '',
     NOTIFICATION_CANISTER_ID: process.env.NOTIFICATION_CANISTER_ID || '',
+    VAPID_SUBJECT: process.env.VAPID_SUBJECT || '',
+    VAPID_PUBLIC_KEY: process.env.VAPID_PUBLIC_KEY || '',
     WORKER_ED25519_SECRET_KEY: process.env.WORKER_ED25519_SECRET_KEY || '',
+    VAPID_PRIVATE_KEY: process.env.VAPID_PRIVATE_KEY || '',
   };
 }
 
