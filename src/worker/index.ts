@@ -63,12 +63,9 @@ function identityFromBase64Secret(b64: string): Ed25519KeyIdentity {
 async function sendWebPushBatch(notifications: CanNotification[], env: Env) {
   log('Preparing to send web-push batch:', notifications.length);
   const tasks = notifications.map(async (n, i) => {
-    const endpoint = n.subscription.endpoint;
-    log('Sending notification', i + 1, 'to', redact(endpoint, 16));
-
     const result = await sendNotification(
       {
-        endpoint,
+        endpoint: n.subscription.endpoint,
         expirationTime: n.subscription.expirationTime.length ? n.subscription.expirationTime[0] : null,
         keys: {
           p256dh: n.subscription.keys.p256dh,
@@ -123,7 +120,6 @@ async function runCycle(env: Env) {
       warn('NOTIFICATION_CANISTER_ID is not set. Skipping cycle.');
       return;
     }
-    log('runCycle() start. Creating identity...');
     const identity = identityFromBase64Secret(env.WORKER_ED25519_SECRET_KEY);
     const agent = new HttpAgent({ host: env.IC_HOST, identity, fetch: (globalThis as any).fetch?.bind(globalThis) });
 
@@ -150,7 +146,6 @@ async function runCycle(env: Env) {
           log('Batch is empty after collect.');
         } else {
           await sendWebPushBatch(batch, env);
-          log('Batch processing complete.');
         }
       }
     } catch (e: any) {
@@ -158,8 +153,6 @@ async function runCycle(env: Env) {
     }
   } catch (e: any) {
     err('runCycle() error:', e?.stack || String(e));
-  } finally {
-    log('runCycle() end');
   }
 }
 
@@ -183,7 +176,6 @@ function startScheduler(env: Env) {
 
   const scheduleNext = (delayMs: number) => {
     if (stopped) return;
-    log('Scheduling next run in', Math.max(0, Math.round(delayMs)), 'ms');
     timer = setTimeout(tick, Math.max(0, delayMs));
   };
 
