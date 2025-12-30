@@ -1,10 +1,15 @@
 import {useEffect, useRef, useState} from 'react';
 import {createPortal} from 'react-dom';
-import {canisterId, createActor} from 'declarations/chat_backend';
+import {canisterId as chatCanisterId, createActor as createChatActor} from 'declarations/chat_backend';
+import {
+    canisterId as notificationsCanisterId,
+    createActor as createNotificationsActor
+} from 'declarations/notification_canister';
 import {HttpAgent} from '@dfinity/agent';
 import {Ed25519KeyIdentity} from '@dfinity/identity';
 import './index.scss';
 import LoadingButton from './components/LoadingButton';
+import {Principal} from "@dfinity/principal";
 
 const ID_STORAGE_KEY_V2 = 'chat.identity.v2';
 const ID_STORAGE_SOURCE_KEY = 'chat.identity.source';
@@ -22,6 +27,7 @@ function openIdb() {
         req.onerror = () => resolve(null);
     });
 }
+
 function idbGet(db, key) {
     return new Promise((resolve) => {
         if (!db) return resolve(null);
@@ -32,6 +38,7 @@ function idbGet(db, key) {
         req.onerror = () => resolve(null);
     });
 }
+
 function idbSet(db, key, value) {
     return new Promise((resolve) => {
         if (!db) return resolve(false);
@@ -64,8 +71,11 @@ async function getOrCreateIdentity(setDiag) {
             const parsed = JSON.parse(storedV2);
             if (parsed && parsed.v === 2 && parsed.type === 'ed25519' && parsed.sk) {
                 const id = Ed25519KeyIdentity.fromSecretKey(b64ToUint8(parsed.sk));
-                try { localStorage.setItem(ID_STORAGE_SOURCE_KEY, 'localStorage(v2)'); } catch (_) {}
-                if (setDiag) setDiag({ source: 'localStorage(v2)', error: '' });
+                try {
+                    localStorage.setItem(ID_STORAGE_SOURCE_KEY, 'localStorage(v2)');
+                } catch (_) {
+                }
+                if (setDiag) setDiag({source: 'localStorage(v2)', error: ''});
                 return id;
             }
         }
@@ -81,9 +91,15 @@ async function getOrCreateIdentity(setDiag) {
             if (parsed && parsed.v === 2 && parsed.type === 'ed25519' && parsed.sk) {
                 const id = Ed25519KeyIdentity.fromSecretKey(b64ToUint8(parsed.sk));
                 // Repair localStorage with V2
-                try { localStorage.setItem(ID_STORAGE_KEY_V2, JSON.stringify(parsed)); } catch (_) {}
-                try { localStorage.setItem(ID_STORAGE_SOURCE_KEY, 'indexedDB(v2)'); } catch (_) {}
-                if (setDiag) setDiag({ source: 'indexedDB(v2)', error: '' });
+                try {
+                    localStorage.setItem(ID_STORAGE_KEY_V2, JSON.stringify(parsed));
+                } catch (_) {
+                }
+                try {
+                    localStorage.setItem(ID_STORAGE_SOURCE_KEY, 'indexedDB(v2)');
+                } catch (_) {
+                }
+                if (setDiag) setDiag({source: 'indexedDB(v2)', error: ''});
                 return id;
             }
         }
@@ -96,7 +112,7 @@ async function getOrCreateIdentity(setDiag) {
     const skArr = Array.from(identity.getKeyPair().secretKey);
     let skBin = '';
     for (let i = 0; i < skArr.length; i++) skBin += String.fromCharCode(skArr[i]);
-    const v2wrapper = { v: 2, type: 'ed25519', sk: btoa(skBin) };
+    const v2wrapper = {v: 2, type: 'ed25519', sk: btoa(skBin)};
     try {
         localStorage.setItem(ID_STORAGE_KEY_V2, JSON.stringify(v2wrapper));
         localStorage.setItem(ID_STORAGE_SOURCE_KEY, 'generated(v2)');
@@ -109,12 +125,10 @@ async function getOrCreateIdentity(setDiag) {
     } catch (e) {
         lastError = (lastError ? lastError + ' | ' : '') + 'indexedDB v2 write failed: ' + (e?.message || String(e));
     }
-    if (setDiag) setDiag({ source: 'generated(v2)', error: lastError });
+    if (setDiag) setDiag({source: 'generated(v2)', error: lastError});
     return identity;
 }
 
-// VAPID public key used by PushManager (must match backend NotificationCanister.updateApplication)
-const VAPID_PUBLIC_KEY = 'BK2eDWyXNMc9gwVd5vRCR8cNz2hgEE0vaUvH50LhtuCfj2v73P15taeCzSXEuSMlKeBmXO0Akyd4TN9DO-R9hDM';
 
 function urlBase64ToUint8Array(base64String) {
     const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
@@ -138,8 +152,11 @@ function arrayBufferToBase64Url(buffer) {
 }
 
 function App() {
-    const [actor, setActor] = useState(null);
-    const actorRef = useRef(null);
+    const [vapidPublicKey, setVapidPublicKey] = useState('');
+    const [chatActor, setChatActor] = useState(null);
+    const chatActorRef = useRef(null);
+    const [notificationsActor, setNotificationsActor] = useState(null);
+    const notificationsActorRef = useRef(null);
     const pendingJoinRef = useRef('');
     const [currentView, setCurrentView] = useState('home'); // 'home', 'room', 'join'
     const [roomCode, setRoomCode] = useState('');
@@ -209,9 +226,22 @@ function App() {
                         console.warn('fetchRootKey failed', e);
                     }
                 }
-                const a = createActor(canisterId, {agent});
-                actorRef.current = a;
-                setActor(a);
+                const ca = createChatActor(chatCanisterId, {agent});
+                chatActorRef.current = ca;
+                setChatActor(ca);
+                const na = createNotificationsActor(notificationsCanisterId, {agent});
+                notificationsActorRef.current = na;
+                setNotificationsActor(na);
+                try {
+                    const key = await na.getVapidPublicKey();
+                    if (typeof key === 'string' && key.length > 0) {
+                        setVapidPublicKey(key);
+                    } else {
+                        console.warn('getVapidPublicKey returned empty value');
+                    }
+                } catch (e) {
+                    console.warn('Failed to fetch VAPID public key', e);
+                }
             } catch (e) {
                 console.error('Failed to init identity/actor', e);
                 setIdStorageError((prev) => prev ? prev + ' | ' + (e?.message || String(e)) : (e?.message || String(e)));
@@ -245,10 +275,10 @@ function App() {
                         const payload = {
                             endpoint,
                             expirationTime: expirationTime === null ? [] : [Number(expirationTime)],
-                            keys: { p256dh, auth },
+                            keys: {p256dh, auth},
                         };
-                        if (actorRef.current) {
-                            await actorRef.current.subscribe(payload);
+                        if (notificationsActorRef.current) {
+                            await notificationsActorRef.current.subscribe(Principal.fromText(chatCanisterId), payload);
                             setPushStatus('subscribed');
                         }
                     }
@@ -277,20 +307,24 @@ function App() {
                     try {
                         const already = await navigator.storage.persisted();
                         if (!cancelled) setPersistGranted(!!already);
-                    } catch (_) {}
+                    } catch (_) {
+                    }
                 }
                 // Request persistence if not already granted
                 if (navigator.storage.persist) {
                     try {
                         const granted = await navigator.storage.persist();
                         if (!cancelled) setPersistGranted(!!granted);
-                    } catch (_) {}
+                    } catch (_) {
+                    }
                 }
             } catch (e) {
                 if (!cancelled) setIdStorageError((prev) => prev ? prev + ' | persist() error: ' + (e?.message || String(e)) : 'persist() error: ' + (e?.message || String(e)));
             }
         })();
-        return () => { cancelled = true; };
+        return () => {
+            cancelled = true;
+        };
     }, []);
 
     // Listen for messages from Service Worker (e.g., OPEN_URL from notificationclick)
@@ -312,6 +346,7 @@ function App() {
                 // ignore
             }
         }
+
         if (navigator?.serviceWorker) {
             navigator.serviceWorker.addEventListener('message', onSwMessage);
         }
@@ -342,9 +377,26 @@ function App() {
             }
             let sub = await swReg.pushManager.getSubscription();
             if (!sub) {
+                let key = vapidPublicKey;
+                if (!key || key.length === 0) {
+                    try {
+                        if (notificationsActorRef.current) {
+                            const fetched = await notificationsActorRef.current.getVapidPublicKey();
+                            if (typeof fetched === 'string' && fetched.length > 0) {
+                                key = fetched;
+                                setVapidPublicKey(fetched);
+                            }
+                        }
+                    } catch (_) { /* ignore; will error below if still missing */ }
+                }
+                if (!key || key.length === 0) {
+                    setPushStatus('error');
+                    setPushError('VAPID public key not available yet. Please try again in a moment.');
+                    return;
+                }
                 sub = await swReg.pushManager.subscribe({
                     userVisibleOnly: true,
-                    applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+                    applicationServerKey: urlBase64ToUint8Array(key),
                 });
             }
             const p256dh = arrayBufferToBase64Url(sub.getKey('p256dh'));
@@ -354,10 +406,10 @@ function App() {
             const payload = {
                 endpoint,
                 expirationTime: expirationTime === null ? [] : [Number(expirationTime)],
-                keys: { p256dh, auth },
+                keys: {p256dh, auth},
             };
-            if (actorRef.current) {
-                await actorRef.current.subscribe(payload);
+            if (notificationsActorRef.current) {
+                await notificationsActorRef.current.subscribe(Principal.fromText(chatCanisterId), payload);
                 setPushStatus('subscribed');
             } else {
                 setPushStatus('error');
@@ -380,7 +432,7 @@ function App() {
                 setPushError('Permission not granted');
                 return;
             }
-            await swReg.showNotification('Local test', { body: 'If you see this, notifications are allowed.' });
+            await swReg.showNotification('Local test', {body: 'If you see this, notifications are allowed.'});
         } catch (e) {
             setPushError('Local notification failed: ' + (e?.message || String(e)));
         }
@@ -394,8 +446,8 @@ function App() {
             const code = refId.toUpperCase();
             setJoinCode(code);
             setCurrentView('join');
-            if (actorRef.current) {
-                handleJoinRoom(code, { silent: true });
+            if (chatActorRef.current) {
+                handleJoinRoom(code, {silent: true});
             } else {
                 // Defer until actor is ready
                 pendingJoinRef.current = code;
@@ -405,12 +457,12 @@ function App() {
 
     // When backend actor becomes ready, perform any pending auto-join
     useEffect(() => {
-        if (actorRef.current && pendingJoinRef.current) {
+        if (chatActorRef.current && pendingJoinRef.current) {
             const code = pendingJoinRef.current;
             pendingJoinRef.current = '';
-            handleJoinRoom(code, { silent: true });
+            handleJoinRoom(code, {silent: true});
         }
-    }, [actor]);
+    }, [chatActor]);
 
     // Update URL when room code changes
     useEffect(() => {
@@ -439,8 +491,8 @@ function App() {
         if (currentView === 'room' && roomCode) {
             const interval = setInterval(async () => {
                 try {
-                    if (!actorRef.current) return;
-                    const roomMessages = await actorRef.current.getMessages(roomCode);
+                    if (!chatActorRef.current) return;
+                    const roomMessages = await chatActorRef.current.getMessages(roomCode);
                     setMessages(roomMessages);
                 } catch (err) {
                     console.error('Error fetching messages:', err);
@@ -456,8 +508,8 @@ function App() {
         if (currentView === 'room' && roomCode) {
             const interval = setInterval(async () => {
                 try {
-                    if (!actorRef.current) return;
-                    const result = await actorRef.current.getRoom(roomCode);
+                    if (!chatActorRef.current) return;
+                    const result = await chatActorRef.current.getRoom(roomCode);
                     if (Array.isArray(result) && result.length > 0) {
                         setRoom(result[0]);
                     } else {
@@ -498,8 +550,8 @@ function App() {
         setIsCreating(true);
         try {
             setError('');
-            if (!actorRef.current) throw new Error('Actor not ready');
-            const result = await actorRef.current.createRoom();
+            if (!chatActorRef.current) throw new Error('Actor not ready');
+            const result = await chatActorRef.current.createRoom();
 
             if ('Ok' in result) {
                 setRoomCode(result.Ok.roomCode);
@@ -525,8 +577,8 @@ function App() {
         const confirmEnd = window.confirm('End room for all participants? This cannot be undone.');
         if (!confirmEnd) return;
         try {
-            if (!actorRef.current) throw new Error('Actor not ready');
-            const ok = await actorRef.current.endRoom(roomCode);
+            if (!chatActorRef.current) throw new Error('Actor not ready');
+            const ok = await chatActorRef.current.endRoom(roomCode);
             if (ok) {
                 setShowExpiredModal(true);
                 setIsExpired(true);
@@ -538,7 +590,7 @@ function App() {
         }
     };
 
-    const handleJoinRoom = async (codeArg = null, options = { silent: false }) => {
+    const handleJoinRoom = async (codeArg = null, options = {silent: false}) => {
         if (isJoining) return;
         setIsJoining(true);
         const codeRaw = (typeof codeArg === 'string' && codeArg ? codeArg : joinCode).trim().toUpperCase();
@@ -555,8 +607,8 @@ function App() {
 
         try {
             if (!options?.silent) setError('');
-            if (!actorRef.current) throw new Error('Actor not ready');
-            const result = await actorRef.current.joinRoom(codeRaw);
+            if (!chatActorRef.current) throw new Error('Actor not ready');
+            const result = await chatActorRef.current.joinRoom(codeRaw);
 
             if ('Ok' in result) {
                 setRoomCode(codeRaw);
@@ -584,8 +636,8 @@ function App() {
         setIsSending(true);
 
         try {
-            if (!actorRef.current) throw new Error('Actor not ready');
-            const result = await actorRef.current.sendMessage(roomCode, newMessage.trim());
+            if (!chatActorRef.current) throw new Error('Actor not ready');
+            const result = await chatActorRef.current.sendMessage(roomCode, newMessage.trim());
 
             if ('Ok' in result) {
                 setMessages(prev => [...prev, result.Ok]);
@@ -602,8 +654,8 @@ function App() {
 
     const handleLeaveRoom = async () => {
         try {
-            if (!actorRef.current) throw new Error('Actor not ready');
-            await actorRef.current.leaveRoom(roomCode);
+            if (!chatActorRef.current) throw new Error('Actor not ready');
+            await chatActorRef.current.leaveRoom(roomCode);
         } catch (err) {
             console.error('Error leaving room:', err);
         } finally {
@@ -643,7 +695,11 @@ function App() {
     };
 
     const principalToText = (p) => {
-        try { return p && typeof p.toText === 'function' ? p.toText() : String(p); } catch (_) { return String(p); }
+        try {
+            return p && typeof p.toText === 'function' ? p.toText() : String(p);
+        } catch (_) {
+            return String(p);
+        }
     };
 
     const formatMessageSender = (message) => {
@@ -670,7 +726,8 @@ function App() {
                     </div>
 
                     {/* PWA / Notifications panel */}
-                    <div className="pwa-panel" style={{marginTop: '24px', padding: '12px', border: '1px solid #333', borderRadius: '8px'}}>
+                    <div className="pwa-panel"
+                         style={{marginTop: '24px', padding: '12px', border: '1px solid #333', borderRadius: '8px'}}>
                         <h3>Notifications</h3>
                         <div style={{fontSize: '0.95em', lineHeight: 1.6}}>
                             <div>Service Worker: {swReady ? 'ready' : 'not ready'}</div>
@@ -679,9 +736,11 @@ function App() {
                             <div>My principal: {myPrincipal || 'unknown'}</div>
                             <div>Identity storage: {idStorageSource || 'unknown'}</div>
                             <div>
-                                Storage persistence: {persistSupported ? (persistGranted === null ? 'checking…' : (persistGranted ? 'granted' : 'not granted')) : 'unsupported'}
+                                Storage
+                                persistence: {persistSupported ? (persistGranted === null ? 'checking…' : (persistGranted ? 'granted' : 'not granted')) : 'unsupported'}
                             </div>
-                            {idStorageError && <div className="error" style={{marginTop: '8px'}}>Identity storage error: {idStorageError}</div>}
+                            {idStorageError && <div className="error" style={{marginTop: '8px'}}>Identity storage
+                                error: {idStorageError}</div>}
                             {pushError && <div className="error" style={{marginTop: '8px'}}>{pushError}</div>}
                         </div>
                         <div className="button-group" style={{marginTop: '12px'}}>
@@ -703,7 +762,8 @@ function App() {
                             </button>
                         </div>
                         <div style={{marginTop: '8px', fontSize: '0.9em', opacity: 0.8}}>
-                            Tip: On iOS, install from Safari via Share → Add to Home Screen, then open the app icon and tap “Enable notifications”.
+                            Tip: On iOS, install from Safari via Share → Add to Home Screen, then open the app icon and
+                            tap “Enable notifications”.
                         </div>
                     </div>
                 </div>
@@ -810,7 +870,8 @@ function App() {
                             className="message-input"
                             disabled={isExpired || isSending}
                         />
-                        <LoadingButton type="submit" className="btn btn-primary" isLoading={isSending} disabled={isExpired}>
+                        <LoadingButton type="submit" className="btn btn-primary" isLoading={isSending}
+                                       disabled={isExpired}>
                             Send
                         </LoadingButton>
                     </form>

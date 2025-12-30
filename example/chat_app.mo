@@ -11,7 +11,7 @@ import Principal "mo:base/Principal";
 import _Debug "mo:base/Debug";
 import Nat "mo:base/Nat";
 
-import NotificationCanister "./notification_canister";
+import NotificationDelegate "./notification_delegate";
 
 persistent actor canChatBackend {
   // Types
@@ -64,7 +64,7 @@ persistent actor canChatBackend {
   private let SESSION_TIMEOUT : Int = 20 * 60 * 1000_000_000; // 20 minutes in nanoseconds
   private let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
-  transient let Notifications = NotificationCanister.getActor();
+  transient let NotificationsActor = NotificationDelegate.getActor();
 
   // Migration function to handle upgrade
   system func preupgrade() {
@@ -309,8 +309,7 @@ persistent actor canChatBackend {
 
             rooms.put(roomCode, updatedRoom);
 
-            // Fire-and-forget push notifications to other participants
-            let body : NotificationCanister.NotificationBody = {
+            let body : NotificationDelegate.NotificationBody = {
               title = user.displayName # " in room " # roomCode;
               content = content;
               url = ?("/?refID=" # roomCode);
@@ -318,7 +317,7 @@ persistent actor canChatBackend {
             // Notify all participants except the sender (by principal)
             for (u in Array.vals<User>(room.participants)) {
               if (u.principal != user.principal) {
-                ignore Notifications.sendNotification(u.principal, body);
+                ignore NotificationsActor.sendNotification(u.principal, body);
               };
             };
 

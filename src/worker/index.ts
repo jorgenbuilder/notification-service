@@ -63,32 +63,37 @@ function identityFromBase64Secret(b64: string): Ed25519KeyIdentity {
 async function sendWebPushBatch(notifications: CanNotification[], env: Env) {
   log('Preparing to send web-push batch:', notifications.length);
   const tasks = notifications.map(async (n, i) => {
-    const result = await sendNotification(
-      {
-        endpoint: n.subscription.endpoint,
-        expirationTime: n.subscription.expirationTime.length ? n.subscription.expirationTime[0] : null,
-        keys: {
-          p256dh: n.subscription.keys.p256dh,
-          auth: n.subscription.keys.auth,
+    let result;
+    try {
+      result = await sendNotification(
+        {
+          endpoint: n.subscription.endpoint,
+          expirationTime: n.subscription.expirationTime.length ? n.subscription.expirationTime[0] : null,
+          keys: {
+            p256dh: n.subscription.keys.p256dh,
+            auth: n.subscription.keys.auth,
+          },
         },
-      },
-      JSON.stringify({
-        title: n.body.title,
-        body: n.body.content,
-        url: n.body.url.length ? n.body.url[0] : undefined
-      }),
-      {
-        TTL: 60 * 60, // 1 hour
-        vapidDetails: {
-          subject: env.VAPID_SUBJECT,
-          publicKey: env.VAPID_PUBLIC_KEY,
-          privateKey: env.VAPID_PRIVATE_KEY,
-        },
-        headers: {
-          Urgency: 'normal',
-        },
-      }
-    );
+        JSON.stringify({
+          title: n.body.title,
+          body: n.body.content,
+          url: n.body.url.length ? n.body.url[0] : undefined
+        }),
+        {
+          TTL: 60 * 60, // 1 hour
+          vapidDetails: {
+            subject: env.VAPID_SUBJECT,
+            publicKey: env.VAPID_PUBLIC_KEY,
+            privateKey: env.VAPID_PRIVATE_KEY,
+          },
+          headers: {
+            Urgency: 'normal',
+          },
+        }
+      );
+    } catch (err) {
+      throw new Error(String(err) + ". Response body: " + (err as any).body);
+    }
     const status = result.statusCode ?? 0;
     if (!(status >= 200 && status < 300)) {
       const text = (result.body && typeof result.body === 'string') ? result.body : '';

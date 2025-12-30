@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "vite --port 3000",
-    "prebuild": "npm i --include=dev && dfx generate chat_backend",
+    "prebuild": "npm i --include=dev && dfx generate chat_backend && dfx generate notification_canister",
     "build": "vite build",
     "format": "prettier --write \"src/**/*.{json,js,jsx,css,scss}\"",
     "dev": "vite"
