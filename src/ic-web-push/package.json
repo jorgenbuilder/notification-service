@@ -1,0 +1,46 @@
+{
+  "name": "ic-web-push",
+  "version": "0.1.0",
+  "description": "Browser SDK for Internet Computer web push notifications with a companion service worker.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "sw.js",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "rimraf dist",
+    "copy:declarations": "node -e \"const fs=require('fs');const path=require('path');const src=path.join(process.cwd(),'declarations');const dest=path.join(process.cwd(),'dist','declarations');try{if(fs.existsSync(src)){fs.rmSync(dest,{recursive:true,force:true});fs.mkdirSync(dest,{recursive:true});fs.cpSync(src,dest,{recursive:true});console.log('[ic-web-push] Copied',src,'->',dest);}else{console.warn('[ic-web-push] No declarations directory found at',src);}}catch(e){console.error('[ic-web-push] Failed to copy declarations:',e&&e.message||e);process.exitCode=1;}\"",
+    "build": "tsc -p tsconfig.json && npm run copy:declarations",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "internet-computer",
+    "dfinity",
+    "web-push",
+    "service-worker",
+    "notifications"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "typescript": "^5.4.0"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.5"
+  },
+  "peerDependencies": {
+    "@dfinity/agent": "^3.4.3",
+    "@dfinity/principal": "^3.4.3"
+  },
+  "sideEffects": false
+}

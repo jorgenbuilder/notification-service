@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "declaration": true,
+    "declarationMap": false,
+    "emitDeclarationOnly": false,
+    "outDir": "./dist",
+    "rootDir": ".",
+    "strict": true,
+    "skipLibCheck": true,
+    "allowJs": true,
+    "lib": ["ES2020", "DOM"],
+    "types": []
+  },
+  "include": [
+    "index.ts",
+    "notification_canister.did.js"
+  ]
+}

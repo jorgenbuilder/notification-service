@@ -1,0 +1,12 @@
+# Exclude dev and config files from the published package
+node_modules
+npm-debug.log*
+.DS_Store
+*.map
+.*/
+
+# We only publish files listed in package.json "files", this is extra safety
+*.ts
+!index.ts
+!.npmignore
+!.gitignore
