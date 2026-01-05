@@ -314,7 +314,7 @@ persistent actor canChatBackend {
             let body : NotificationDelegate.NotificationBody = {
               title = user.displayName # " in room " # roomCode;
               content = content;
-              url = ?("/?refID=" # roomCode);
+              url = ?("/" # roomCode);
             };
             // Notify all participants except the sender (by principal)
             let notifications : List.List<(Principal, NotificationDelegate.NotificationBody)> = List.empty();

@@ -260,7 +260,7 @@ function App() {
                     if (target.origin !== window.location.origin) return;
                     // If we are already at target, just focus
                     if (window.location.href === target.href) return;
-                    // Navigate the page so initial URL parsing logic runs (joins by refID)
+                    // Navigate the page so initial URL parsing logic runs (joins by path-based room id)
                     window.location.href = target.href;
                 }
             } catch (_) {
@@ -354,20 +354,26 @@ function App() {
         }
     }
 
-    // Check for room code in URL on component mount and auto-join deterministically
+    // Check for room code in URL path on component mount and auto-join deterministically
+    // New routing: in-room view is at "/<ROOM_ID>", not "?refID=<ROOM_ID>"
     useEffect(() => {
-        const urlParams = new URLSearchParams(window.location.search);
-        const refId = urlParams.get('refID');
-        if (refId && refId.length === 6) {
-            const code = refId.toUpperCase();
-            setJoinCode(code);
-            setCurrentView('join');
-            if (chatActorRef.current) {
-                handleJoinRoom(code, {silent: true});
-            } else {
-                // Defer until actor is ready
-                pendingJoinRef.current = code;
+        try {
+            const path = window.location.pathname || '/';
+            const segments = path.split('/').filter(Boolean);
+            const last = segments.length > 0 ? segments[segments.length - 1] : '';
+            const candidate = String(last || '').toUpperCase();
+            const isSixAlpha = /^[A-Z0-9]{6}$/.test(candidate);
+            if (isSixAlpha) {
+                setJoinCode(candidate);
+                setCurrentView('join');
+                if (chatActorRef.current) {
+                    handleJoinRoom(candidate, {silent: true});
+                } else {
+                    // Defer until actor is ready
+                    pendingJoinRef.current = candidate;
+                }
             }
+        } catch (_) {
         }
     }, []);
 
@@ -383,7 +389,13 @@ function App() {
     // Update URL when room code changes
     useEffect(() => {
         if (roomCode && currentView === 'room') {
-            const newUrl = `${window.location.origin}${window.location.pathname}?refID=${roomCode}`;
+            const path = window.location.pathname || '/';
+            const segs = path.split('/').filter(Boolean);
+            if (segs.length && /^[A-Z0-9]{6}$/.test(String(segs[segs.length - 1]).toUpperCase())) {
+                segs.pop(); // remove previous roomId segment
+            }
+            const basePath = segs.length ? ('/' + segs.join('/')) : '';
+            const newUrl = `${window.location.origin}${basePath}/${roomCode}`;
             window.history.pushState({}, '', newUrl);
         }
     }, [roomCode, currentView]);
@@ -581,21 +593,41 @@ function App() {
             setMessages([]);
             setNewMessage('');
             setError('');
-            // Clear URL parameters
-            window.history.pushState({}, '', window.location.pathname);
+            // Return to base path (remove any roomId segment from the end of the path)
+            const path = window.location.pathname || '/';
+            const segs = path.split('/').filter(Boolean);
+            if (segs.length && /^[A-Z0-9]{6}$/.test(String(segs[segs.length - 1]).toUpperCase())) {
+                segs.pop();
+            }
+            const basePath = '/' + segs.join('/');
+            const finalBase = basePath === '' ? '/' : basePath;
+            window.history.pushState({}, '', finalBase);
         }
     };
 
     const handleCopyRoomCode = async () => {
         try {
-            const roomUrl = `${window.location.origin}${window.location.pathname}?refID=${roomCode}`;
+            const path = window.location.pathname || '/';
+            const segs = path.split('/').filter(Boolean);
+            if (segs.length && /^[A-Z0-9]{6}$/.test(String(segs[segs.length - 1]).toUpperCase())) {
+                segs.pop(); // strip existing room id if present
+            }
+            const basePath = segs.length ? ('/' + segs.join('/')) : '';
+            const roomUrl = `${window.location.origin}${basePath}/${roomCode}`;
             await navigator.clipboard.writeText(roomUrl);
             setCopySuccess(true);
             setTimeout(() => setCopySuccess(false), 2000);
         } catch (err) {
             // Fallback for older browsers
+            const path = window.location.pathname || '/';
+            const segs = path.split('/').filter(Boolean);
+            if (segs.length && /^[A-Z0-9]{6}$/.test(String(segs[segs.length - 1]).toUpperCase())) {
+                segs.pop();
+            }
+            const basePath = segs.length ? ('/' + segs.join('/')) : '';
+            const fallbackUrl = `${window.location.origin}${basePath}/${roomCode}`;
             const textArea = document.createElement('textarea');
-            textArea.value = `${window.location.origin}${window.location.pathname}?refID=${roomCode}`;
+            textArea.value = fallbackUrl;
             document.body.appendChild(textArea);
             textArea.select();
             document.execCommand('copy');
