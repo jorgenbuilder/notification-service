@@ -290,7 +290,7 @@ function App() {
         setLocalNotifError(null);
         setIsNotifWorking(true);
         try {
-            await icWebPush.subscribe({ requestPermissionIfNeeded: true });
+            await icWebPush.subscribe({requestPermissionIfNeeded: true});
         } catch (e) {
             console.error('Subscribe failed: ' + (e?.message || String(e)));
             setLocalNotifError('Subscribe failed: ' + (e?.message || String(e)));
@@ -581,28 +581,26 @@ function App() {
     };
 
     const handleLeaveRoom = async () => {
-        try {
-            if (!chatActorRef.current) throw new Error('Actor not ready');
-            await chatActorRef.current.leaveRoom(roomCode);
-        } catch (err) {
-            console.error('Error leaving room:', err);
-        } finally {
-            setCurrentView('home');
-            setRoomCode('');
-            setRoom(null);
-            setMessages([]);
-            setNewMessage('');
-            setError('');
-            // Return to base path (remove any roomId segment from the end of the path)
-            const path = window.location.pathname || '/';
-            const segs = path.split('/').filter(Boolean);
-            if (segs.length && /^[A-Z0-9]{6}$/.test(String(segs[segs.length - 1]).toUpperCase())) {
-                segs.pop();
-            }
-            const basePath = '/' + segs.join('/');
-            const finalBase = basePath === '' ? '/' : basePath;
-            window.history.pushState({}, '', finalBase);
+        if (chatActorRef.current) {
+            chatActorRef.current.leaveRoom(roomCode).catch(err => console.error('Error leaving room:', err));
+        } else {
+            console.error('Actor not ready');
         }
+        setCurrentView('home');
+        setRoomCode('');
+        setRoom(null);
+        setMessages([]);
+        setNewMessage('');
+        setError('');
+        // Return to base path (remove any roomId segment from the end of the path)
+        const path = window.location.pathname || '/';
+        const segs = path.split('/').filter(Boolean);
+        if (segs.length && /^[A-Z0-9]{6}$/.test(String(segs[segs.length - 1]).toUpperCase())) {
+            segs.pop();
+        }
+        const basePath = '/' + segs.join('/');
+        const finalBase = basePath === '' ? '/' : basePath;
+        window.history.pushState({}, '', finalBase);
     };
 
     const handleCopyRoomCode = async () => {
@@ -810,9 +808,10 @@ function App() {
                         className="message-input"
                         disabled={isExpired || isSending}
                     />
-                    <LoadingButton type="submit" className="btn btn-primary" isLoading={isSending}
-                                   disabled={isExpired}>
-                        Send
+                    <LoadingButton type="submit" className="btn btn-primary send-btn" isLoading={isSending}
+                                   disabled={isExpired} ariaLabel="Send message" title="Send message"
+                                   showLabelWhenLoading={false}>
+                        ➤
                     </LoadingButton>
                 </form>
                 {showExpiredModal && createPortal((<div className="modal-overlay" role="dialog" aria-modal="true">

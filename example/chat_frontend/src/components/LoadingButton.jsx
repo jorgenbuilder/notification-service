@@ -8,6 +8,8 @@ export default function LoadingButton({
   className = '',
   children,
   title,
+  ariaLabel,
+  showLabelWhenLoading = true,
 }) {
   const isDisabled = disabled || isLoading;
   return (
@@ -19,9 +21,10 @@ export default function LoadingButton({
       aria-disabled={isDisabled}
       aria-busy={isLoading}
       title={title}
+      aria-label={ariaLabel}
     >
       {isLoading && <span className="spinner" aria-hidden="true" />}
-      <span className="btn-label">{children}</span>
+      {(!isLoading || showLabelWhenLoading) && <span className="btn-label">{children}</span>}
     </button>
   );
 }
