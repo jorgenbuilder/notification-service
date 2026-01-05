@@ -10,6 +10,7 @@ export const idlFactory = ({ IDL }) => {
     'content' : IDL.Text,
   });
   const Notification = IDL.Record({
+    'context' : IDL.Tuple(IDL.Principal, IDL.Principal),
     'subscription' : Subscription,
     'body' : NotificationBody,
   });
@@ -36,6 +37,11 @@ export const idlFactory = ({ IDL }) => {
     'http_request' : IDL.Func([HttpRequest], [HttpResponse], ['query']),
     'isQueueEmpty' : IDL.Func([], [IDL.Bool], ['query']),
     'registerApplication' : IDL.Func([IDL.Principal], [], ['oneway']),
+    'reportBrokenSubscription' : IDL.Func(
+        [IDL.Principal, IDL.Principal, IDL.Text],
+        [],
+        [],
+      ),
     'sendNotification' : IDL.Func(
         [IDL.Principal, NotificationBody],
         [IDL.Nat],

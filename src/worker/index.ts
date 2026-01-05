@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { Actor, HttpAgent } from '@dfinity/agent';
 import { Ed25519KeyIdentity } from '@dfinity/identity';
+import { Principal } from '@dfinity/principal';
 import { sendNotification } from 'web-push';
 
 export interface Env {
@@ -13,6 +14,7 @@ export interface Env {
 }
 
 type CanNotification = {
+  context: [Principal, Principal];
   subscription: {
     endpoint: string;
     expirationTime: [number] | [];
@@ -38,12 +40,18 @@ const idlFactory = ({ IDL }: { IDL: typeof import('@dfinity/candid').IDL }) => {
   });
   const NotificationBody = IDL.Record({ title: Text, content: Text, url: IDL.Opt(Text) });
   const Notification = IDL.Record({
+    context: IDL.Tuple(IDL.Principal, IDL.Principal),
     subscription: Subscription,
     body: NotificationBody,
   });
   return IDL.Service({
     isQueueEmpty: IDL.Func([], [IDL.Bool], ['query']),
     collect: IDL.Func([], [IDL.Vec(Notification)], []),
+    reportBrokenSubscription: IDL.Func(
+      [IDL.Principal, IDL.Principal, IDL.Text],
+      [],
+      [],
+    ),
   });
 };
 
@@ -52,15 +60,13 @@ const ts = () => new Date().toISOString();
 const log = (...args: any[]) => console.log(ts(), PREFIX, ...args);
 const warn = (...args: any[]) => console.warn(ts(), PREFIX, ...args);
 const err = (...args: any[]) => console.error(ts(), PREFIX, ...args);
-const redact = (value: string | undefined | null, keep: number = 6) =>
-  value ? `${value.slice(0, keep)}...` : String(value);
 
 function identityFromBase64Secret(b64: string): Ed25519KeyIdentity {
   const raw = Uint8Array.from(Buffer.from(String(b64).replace(/\s+/g, ''), 'base64'));
   return Ed25519KeyIdentity.fromSecretKey(raw);
 }
 
-async function sendWebPushBatch(notifications: CanNotification[], env: Env) {
+async function sendWebPushBatch(actor: any, notifications: CanNotification[], env: Env) {
   log('Preparing to send web-push batch:', notifications.length);
   const tasks = notifications.map(async (n, i) => {
     let result;
@@ -105,13 +111,29 @@ async function sendWebPushBatch(notifications: CanNotification[], env: Env) {
   const results = await Promise.allSettled(tasks);
   let ok = 0, fail = 0;
   const errors: any[] = [];
+  let brokenSubscriptions: number[] = [];
   results.forEach((r, i) => {
     if (r.status === 'fulfilled') ok++; else {
       fail++;
       errors.push({ index: i, reason: String(r.reason) });
+      if (String(r.reason).includes('push subscription has unsubscribed or expired')) {
+        brokenSubscriptions.push(i);
+      }
     }
   });
   log('WebPush results:', { ok, fail });
+  if (brokenSubscriptions.length > 0) {
+    log(`Reporting ${brokenSubscriptions.length} broken subscriptions...`);
+    await Promise.all(brokenSubscriptions.map(async (index) => {
+      let notification = notifications[index];
+      try {
+        await actor.reportBrokenSubscription(notification.context[0], notification.context[1], notification.subscription.endpoint);
+      } catch (err) {
+        console.error(err);
+        // pass
+      }
+    }));
+  }
   if (fail > 0) warn('Some pushes failed. Sample error:', errors[0]);
 }
 
@@ -150,7 +172,7 @@ async function runCycle(env: Env) {
         if (batch.length === 0) {
           log('Batch is empty after collect.');
         } else {
-          await sendWebPushBatch(batch, env);
+          await sendWebPushBatch(actor, batch, env);
         }
       }
     } catch (e: any) {

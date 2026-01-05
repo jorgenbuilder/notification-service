@@ -14,6 +14,7 @@ export interface HttpResponse {
   'status_code' : number,
 }
 export interface Notification {
+  'context' : [Principal, Principal],
   'subscription' : Subscription,
   'body' : NotificationBody,
 }
@@ -30,6 +31,10 @@ export interface NotificationCanister {
   'http_request' : ActorMethod<[HttpRequest], HttpResponse>,
   'isQueueEmpty' : ActorMethod<[], boolean>,
   'registerApplication' : ActorMethod<[Principal], undefined>,
+  'reportBrokenSubscription' : ActorMethod<
+    [Principal, Principal, string],
+    undefined
+  >,
   'sendNotification' : ActorMethod<[Principal, NotificationBody], bigint>,
   'subscribe' : ActorMethod<[Principal, Subscription], undefined>,
   'unsubscribe' : ActorMethod<[Principal, string], undefined>,

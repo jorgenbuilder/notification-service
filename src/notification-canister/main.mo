@@ -29,12 +29,6 @@ persistent actor class NotificationCanister(worker : Principal) = self {
     };
   };
 
-  type Vapid = {
-    subject : Text;
-    publicKey : Text;
-    privateKey : Text;
-  };
-
   type NotificationBody = {
     title : Text;
     content : Text;
@@ -44,6 +38,7 @@ persistent actor class NotificationCanister(worker : Principal) = self {
   type Notification = {
     subscription : Subscription;
     body : NotificationBody;
+    context : (application : Principal, receiver : Principal);
   };
 
   let applications : Map.Map<Principal, Application> = Map.empty();
@@ -102,20 +97,24 @@ persistent actor class NotificationCanister(worker : Principal) = self {
     };
   };
 
-  public shared ({ caller }) func unsubscribe(application : Principal, endpoint : Text) {
-    let ?app = Map.get(applications, Principal.compare, application) else throw Error.reject("Application not found");
-    switch (Map.get(app.subscriptions, Principal.compare, caller)) {
+  private func removeSubscription_(app : Application, user : Principal, endpoint : Text) {
+    switch (Map.get(app.subscriptions, Principal.compare, user)) {
       case (?list) {
         let listUpd = List.filter(list, func(item) = item.endpoint != endpoint);
         if (List.isEmpty(listUpd)) {
-          Map.remove(app.subscriptions, Principal.compare, caller);
+          Map.remove(app.subscriptions, Principal.compare, user);
         } else {
-          Map.add(app.subscriptions, Principal.compare, caller, listUpd);
+          Map.add(app.subscriptions, Principal.compare, user, listUpd);
         };
         subscriptionsCount.sub(List.size(list) - List.size(listUpd));
       };
       case (null) {};
     };
+  };
+
+  public shared ({ caller }) func unsubscribe(application : Principal, endpoint : Text) {
+    let ?app = Map.get(applications, Principal.compare, application) else throw Error.reject("Application not found");
+    removeSubscription_(app, caller, endpoint);
   };
 
   public shared ({ caller }) func unsubscribeAll(application : Principal) {
@@ -165,7 +164,7 @@ persistent actor class NotificationCanister(worker : Principal) = self {
     let ?app = Map.get(applications, Principal.compare, caller) else throw Error.reject("Caller does not have any application registered");
     let ?userSubscriptions = Map.get(app.subscriptions, Principal.compare, user) else return 0;
     for (subscription in List.values(userSubscriptions)) {
-      Queue.pushBack(notificationsQueue, { subscription; body });
+      Queue.pushBack(notificationsQueue, { subscription; body; context = (caller, user) });
     };
     let sentNotifications = List.size(userSubscriptions);
     totalMessages.add(sentNotifications);
@@ -189,6 +188,12 @@ persistent actor class NotificationCanister(worker : Principal) = self {
     };
     sentMessages.add(List.size(ret));
     List.toArray(ret);
+  };
+
+  public shared ({ caller }) func reportBrokenSubscription(application : Principal, user : Principal, endpoint : Text) : async () {
+    assert caller == worker;
+    let ?app = Map.get(applications, Principal.compare, application) else return;
+    removeSubscription_(app, user, endpoint);
   };
 
 };
