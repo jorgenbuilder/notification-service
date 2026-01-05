@@ -94,6 +94,7 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
       // type: 'module', // our sw is classic to maximize compatibility
       updateViaCache: 'none',
     });
+    await reg.update();
     dbg('Service worker registered', reg);
     return reg;
   } catch (e) {

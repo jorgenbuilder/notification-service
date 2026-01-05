@@ -19,22 +19,49 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('push', (event) => {
-  try {
-    const data = event.data ? event.data.json() : {};
-    const title = data.title || 'New notification';
-    const urlFromPayload = (data && data.data && data.data.url) || data.url || '/';
-    const options = {
-      body: data.body || 'You have a new message',
-      icon: '/favicon.ico',
-      badge: '/favicon.ico',
-      data: { ...(data.data || {}), url: urlFromPayload },
-      actions: data.actions || [],
-      requireInteraction: !!data.requireInteraction,
-    };
-    event.waitUntil(self.registration.showNotification(title, options));
-  } catch (e) {
-    event.waitUntil(self.registration.showNotification('New notification', { body: 'You have a new notification', icon: '/favicon.ico' }));
-  }
+  event.waitUntil((async () => {
+    try {
+      const data = event.data ? event.data.json() : {};
+      const title = data.title || 'New notification';
+      const urlFromPayload = (data && data.data && data.data.url) || data.url || '/';
+      const options = {
+        body: data.body || 'You have a new message',
+        icon: '/favicon.ico',
+        badge: '/favicon.ico',
+        data: { ...(data.data || {}), url: urlFromPayload },
+        actions: data.actions || [],
+        requireInteraction: !!data.requireInteraction,
+      };
+
+      let suppress = false;
+      try {
+        const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+        const targetUrl = new URL(urlFromPayload, self.location.origin);
+        for (const client of allClients) {
+          try {
+            const clientUrl = new URL(client.url);
+            if (clientUrl.href === targetUrl.href) {
+              suppress = true;
+              break;
+            }
+          } catch {}
+        }
+      } catch {}
+
+      if (!suppress) {
+        return self.registration.showNotification(title, options);
+      }
+      try {
+        const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+        for (const client of allClients) {
+          client.postMessage({ type: 'ic-web-push:suppressed', url: urlFromPayload, title, body: options.body });
+        }
+      } catch {}
+      return;
+    } catch (e) {
+      return self.registration.showNotification('New notification', { body: 'You have a new notification', icon: '/favicon.ico' });
+    }
+  })());
 });
 
 self.addEventListener('notificationclick', (event) => {
