@@ -11,6 +11,8 @@ import Principal "mo:base/Principal";
 import _Debug "mo:base/Debug";
 import Nat "mo:base/Nat";
 
+import List "mo:core/List";
+
 import NotificationDelegate "./notification_delegate";
 
 persistent actor canChatBackend {
@@ -315,12 +317,15 @@ persistent actor canChatBackend {
               url = ?("/?refID=" # roomCode);
             };
             // Notify all participants except the sender (by principal)
+            let notifications : List.List<(Principal, NotificationDelegate.NotificationBody)> = List.empty();
             for (u in Array.vals<User>(room.participants)) {
               if (u.principal != user.principal) {
-                ignore NotificationsActor.sendNotification(u.principal, body);
+                List.add(notifications, (u.principal, body));
               };
             };
-
+            if (List.size(notifications) > 0) {
+              ignore NotificationsActor.sendNotifications(List.toArray(notifications));
+            };
             #Ok(message);
           };
           case null {

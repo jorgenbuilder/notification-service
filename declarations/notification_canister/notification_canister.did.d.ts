@@ -31,11 +31,14 @@ export interface NotificationCanister {
   'http_request' : ActorMethod<[HttpRequest], HttpResponse>,
   'isQueueEmpty' : ActorMethod<[], boolean>,
   'registerApplication' : ActorMethod<[Principal], undefined>,
-  'reportBrokenSubscription' : ActorMethod<
-    [Principal, Principal, string],
+  'reportBrokenSubscriptions' : ActorMethod<
+    [Array<[Principal, Principal, string]>],
     undefined
   >,
-  'sendNotification' : ActorMethod<[Principal, NotificationBody], bigint>,
+  'sendNotifications' : ActorMethod<
+    [Array<[Principal, NotificationBody]>],
+    undefined
+  >,
   'subscribe' : ActorMethod<[Principal, Subscription], undefined>,
   'unsubscribe' : ActorMethod<[Principal, string], undefined>,
   'unsubscribeAll' : ActorMethod<[Principal], undefined>,

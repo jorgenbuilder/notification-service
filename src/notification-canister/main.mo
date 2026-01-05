@@ -50,8 +50,9 @@ persistent actor class NotificationCanister(worker : Principal) = self {
   ignore pt.addPullValue("applications_count", "", func() = Map.size(applications));
   transient let subscriptionsCount = pt.addCounter("subscriptions_count", "", true);
   transient let totalMessages = pt.addCounter("total_messages", "", true);
-  transient let sentMessages = pt.addCounter("sent_messages", "", true);
-  ignore pt.addPullValue("messages_in_queue", "", func() = Queue.size(notificationsQueue));
+  transient let totalNotifications = pt.addCounter("total_notifications", "", true);
+  transient let sentNotifications = pt.addCounter("sent_notifications", "", true);
+  ignore pt.addPullValue("notifications_in_queue", "", func() = Queue.size(notificationsQueue));
 
   pt.unshare(ptData);
 
@@ -160,15 +161,16 @@ persistent actor class NotificationCanister(worker : Principal) = self {
   };
 
   // app owner interface
-  public shared ({ caller }) func sendNotification(user : Principal, body : NotificationBody) : async Nat {
+  public shared ({ caller }) func sendNotifications(arg : [(user : Principal, body : NotificationBody)]) : async () {
     let ?app = Map.get(applications, Principal.compare, caller) else throw Error.reject("Caller does not have any application registered");
-    let ?userSubscriptions = Map.get(app.subscriptions, Principal.compare, user) else return 0;
-    for (subscription in List.values(userSubscriptions)) {
-      Queue.pushBack(notificationsQueue, { subscription; body; context = (caller, user) });
+    totalMessages.add(arg.size());
+    for ((user, body) in arg.values()) {
+      let ?userSubscriptions = Map.get(app.subscriptions, Principal.compare, user) else return;
+      for (subscription in List.values(userSubscriptions)) {
+        Queue.pushBack(notificationsQueue, { subscription; body; context = (caller, user) });
+      };
+      totalNotifications.add(List.size(userSubscriptions));
     };
-    let sentNotifications = List.size(userSubscriptions);
-    totalMessages.add(sentNotifications);
-    sentNotifications;
   };
 
   // worker interface
@@ -186,14 +188,16 @@ persistent actor class NotificationCanister(worker : Principal) = self {
         case (null) break l;
       };
     };
-    sentMessages.add(List.size(ret));
+    sentNotifications.add(List.size(ret));
     List.toArray(ret);
   };
 
-  public shared ({ caller }) func reportBrokenSubscription(application : Principal, user : Principal, endpoint : Text) : async () {
+  public shared ({ caller }) func reportBrokenSubscriptions(arg : [(application : Principal, user : Principal, endpoint : Text)]) : async () {
     assert caller == worker;
-    let ?app = Map.get(applications, Principal.compare, application) else return;
-    removeSubscription_(app, user, endpoint);
+    label l for ((application, user, endpoint) in arg.values()) {
+      let ?app = Map.get(applications, Principal.compare, application) else continue l;
+      removeSubscription_(app, user, endpoint);
+    };
   };
 
 };

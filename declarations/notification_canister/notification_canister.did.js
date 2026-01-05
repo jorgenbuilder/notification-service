@@ -37,14 +37,14 @@ export const idlFactory = ({ IDL }) => {
     'http_request' : IDL.Func([HttpRequest], [HttpResponse], ['query']),
     'isQueueEmpty' : IDL.Func([], [IDL.Bool], ['query']),
     'registerApplication' : IDL.Func([IDL.Principal], [], ['oneway']),
-    'reportBrokenSubscription' : IDL.Func(
-        [IDL.Principal, IDL.Principal, IDL.Text],
+    'reportBrokenSubscriptions' : IDL.Func(
+        [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Principal, IDL.Text))],
         [],
         [],
       ),
-    'sendNotification' : IDL.Func(
-        [IDL.Principal, NotificationBody],
-        [IDL.Nat],
+    'sendNotifications' : IDL.Func(
+        [IDL.Vec(IDL.Tuple(IDL.Principal, NotificationBody))],
+        [],
         [],
       ),
     'subscribe' : IDL.Func([IDL.Principal, Subscription], [], ['oneway']),

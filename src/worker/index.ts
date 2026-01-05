@@ -47,8 +47,8 @@ const idlFactory = ({ IDL }: { IDL: typeof import('@dfinity/candid').IDL }) => {
   return IDL.Service({
     isQueueEmpty: IDL.Func([], [IDL.Bool], ['query']),
     collect: IDL.Func([], [IDL.Vec(Notification)], []),
-    reportBrokenSubscription: IDL.Func(
-      [IDL.Principal, IDL.Principal, IDL.Text],
+    reportBrokenSubscriptions: IDL.Func(
+      [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Principal, IDL.Text))],
       [],
       [],
     ),
@@ -124,15 +124,15 @@ async function sendWebPushBatch(actor: any, notifications: CanNotification[], en
   log('WebPush results:', { ok, fail });
   if (brokenSubscriptions.length > 0) {
     log(`Reporting ${brokenSubscriptions.length} broken subscriptions...`);
-    await Promise.all(brokenSubscriptions.map(async (index) => {
-      let notification = notifications[index];
-      try {
-        await actor.reportBrokenSubscription(notification.context[0], notification.context[1], notification.subscription.endpoint);
-      } catch (err) {
-        console.error(err);
-        // pass
-      }
-    }));
+    try {
+      await actor.reportBrokenSubscriptions(brokenSubscriptions.map(index => {
+        let notification = notifications[index];
+        return [notification.context[0], notification.context[1], notification.subscription.endpoint];
+      }));
+    } catch (err) {
+      console.error(err);
+      // pass
+    }
   }
   if (fail > 0) warn('Some pushes failed. Sample error:', errors[0]);
 }
