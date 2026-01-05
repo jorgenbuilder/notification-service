@@ -30,7 +30,6 @@ const DEFAULTS = {
 
 let _config: Required<Pick<IcWebPushConfig, 'agent' | 'notificationCanisterId' | 'serviceWorkerPath' | 'serviceWorkerScope'>> &
   Pick<IcWebPushConfig, 'applicationCanisterId'> = { ...DEFAULTS } as any;
-let _agent: HttpAgent | null = null;
 let _actor: any | null = null;
 let _debug = false;
 
@@ -166,7 +165,33 @@ export async function getSubscription(): Promise<PushSubscription | null> {
 
 export async function isSubscribed(): Promise<boolean> {
   const sub = await getSubscription();
-  return !!sub;
+  if (!sub) return false;
+
+  // If applicationCanisterId is configured, verify with server canister.
+  if (_config.applicationCanisterId) {
+    try {
+      const actor = await getActor();
+      const app = Principal.fromText(_config.applicationCanisterId);
+      const ok: boolean = await actor.hasSubscription(app, sub.endpoint);
+      if (!ok) {
+        dbg('[ic-web-push] Local subscription not found on the canister. Removing it locally')
+        // Remote canister has no record: revoke local subscription to keep state consistent.
+        try {
+          await sub.unsubscribe();
+        } catch (e) {
+          console.warn('[ic-web-push] Failed to unsubscribe local PushSubscription after remote mismatch:', e);
+        } finally {
+          setLocalRegistered(null);
+        }
+        return false;
+      }
+    } catch (e) {
+      console.warn('[ic-web-push] hasSubscription check failed; assuming local subscription is valid:', e);
+      // Fall through and trust local presence
+    }
+  }
+
+  return true;
 }
 
 async function ensureServiceWorkerReady(): Promise<ServiceWorkerRegistration> {
@@ -262,20 +287,6 @@ export async function ensureSubscribed(options?: SubscribeOptions): Promise<Push
   return subscribe({ requestPermissionIfNeeded: false });
 }
 
-export async function registerApplication(applicationCanisterId?: string): Promise<void> {
-  const actor = await getActor();
-  const app = Principal.fromText(applicationCanisterId ?? _config.applicationCanisterId ?? '');
-  if (!app) throw new Error('ic-web-push: applicationCanisterId is required for registerApplication');
-  await actor.registerApplication(app);
-}
-
-export async function deregisterApplication(applicationCanisterId?: string): Promise<void> {
-  const actor = await getActor();
-  const app = Principal.fromText(applicationCanisterId ?? _config.applicationCanisterId ?? '');
-  if (!app) throw new Error('ic-web-push: applicationCanisterId is required for deregisterApplication');
-  await actor.deregisterApplication(app);
-}
-
 export type IcWebPushPublicAPI = {
   init: typeof init;
   registerServiceWorker: typeof registerServiceWorker;
@@ -288,8 +299,6 @@ export type IcWebPushPublicAPI = {
   getSubscription: typeof getSubscription;
   isSubscribed: typeof isSubscribed;
   setDebug: typeof setDebug;
-  registerApplication: typeof registerApplication;
-  deregisterApplication: typeof deregisterApplication;
 };
 
 const api: IcWebPushPublicAPI = {
@@ -304,8 +313,6 @@ const api: IcWebPushPublicAPI = {
   getSubscription,
   isSubscribed,
   setDebug,
-  registerApplication,
-  deregisterApplication,
 };
 
 export default api;

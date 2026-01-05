@@ -5,18 +5,21 @@
   "type": "module",
   "scripts": {
     "start": "vite --port 3000",
-    "prebuild": "npm i --include=dev && dfx generate chat_backend && dfx generate notification_canister",
+    "copy:sw": "node -e \"const fs=require('fs'),p=require('path');const src=p.join(process.cwd(),'node_modules','ic-web-push','sw.js');const destDir=p.join(process.cwd(),'public');const dest=p.join(destDir,'sw.js');fs.mkdirSync(destDir,{recursive:true});fs.copyFileSync(src,dest);console.log('[chat_frontend] Copied',src,'->',dest);\"",
+    "postinstall": "npm run copy:sw",
+    "prebuild": "npm run copy:sw && dfx generate chat_backend",
     "build": "vite build",
     "format": "prettier --write \"src/**/*.{json,js,jsx,css,scss}\"",
     "dev": "vite"
   },
   "dependencies": {
-    "@dfinity/agent": "^3.0.0",
-    "@dfinity/candid": "^3.0.0",
+    "@dfinity/agent": "^3.4.3",
+    "@dfinity/candid": "^3.4.3",
     "@dfinity/identity": "^3.4.3",
-    "@dfinity/principal": "^3.0.0",
+    "@dfinity/principal": "^3.4.3",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "ic-web-push": "file:../../src/ic-web-push"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.0.1",

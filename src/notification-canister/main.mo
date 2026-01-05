@@ -75,6 +75,13 @@ persistent actor class NotificationCanister(worker : Principal) = self {
   // end user interface
   public query func getVapidPublicKey() : async Text = async CONST.vapidPublicKey;
 
+  public query ({ caller }) func hasSubscription(application : Principal, endpoint : Text) : async Bool {
+    let ?app = Map.get(applications, Principal.compare, application) else throw Error.reject("Application not found");
+    let ?list = Map.get(app.subscriptions, Principal.compare, caller) else return false;
+    let ?_ = List.findIndex<Subscription>(list, func(item) = item.endpoint == endpoint) else return false;
+    true;
+  };
+
   public shared ({ caller }) func subscribe(application : Principal, subscription : Subscription) {
     let ?app = Map.get(applications, Principal.compare, application) else throw Error.reject("Application not found");
     switch (Map.get(app.subscriptions, Principal.compare, caller)) {

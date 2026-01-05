@@ -1,15 +1,11 @@
 import {useEffect, useRef, useState} from 'react';
 import {createPortal} from 'react-dom';
 import {canisterId as chatCanisterId, createActor as createChatActor} from 'declarations/chat_backend';
-import {
-    canisterId as notificationsCanisterId,
-    createActor as createNotificationsActor
-} from 'declarations/notification_canister';
 import {HttpAgent} from '@dfinity/agent';
 import {Ed25519KeyIdentity} from '@dfinity/identity';
 import './index.scss';
 import LoadingButton from './components/LoadingButton';
-import {Principal} from "@dfinity/principal";
+import icWebPush from 'ic-web-push';
 
 const ID_STORAGE_KEY_V2 = 'chat.identity.v2';
 const ID_STORAGE_SOURCE_KEY = 'chat.identity.source';
@@ -129,34 +125,10 @@ async function getOrCreateIdentity(setDiag) {
     return identity;
 }
 
-
-function urlBase64ToUint8Array(base64String) {
-    const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
-    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-    const rawData = atob(base64);
-    const outputArray = new Uint8Array(rawData.length);
-    for (let i = 0; i < rawData.length; ++i) {
-        outputArray[i] = rawData.charCodeAt(i);
-    }
-    return outputArray;
-}
-
-function arrayBufferToBase64Url(buffer) {
-    const bytes = new Uint8Array(buffer);
-    let binary = '';
-    for (let i = 0; i < bytes.byteLength; i++) {
-        binary += String.fromCharCode(bytes[i]);
-    }
-    const base64 = btoa(binary);
-    return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
 function App() {
-    const [vapidPublicKey, setVapidPublicKey] = useState('');
+    const [agent, setAgent] = useState(null);
     const [chatActor, setChatActor] = useState(null);
     const chatActorRef = useRef(null);
-    const [notificationsActor, setNotificationsActor] = useState(null);
-    const notificationsActorRef = useRef(null);
     const pendingJoinRef = useRef('');
     const [currentView, setCurrentView] = useState('home'); // 'home', 'room', 'join'
     const [roomCode, setRoomCode] = useState('');
@@ -176,18 +148,11 @@ function App() {
     const [isJoining, setIsJoining] = useState(false);
     const [isSending, setIsSending] = useState(false);
 
-    // PWA / Push state
-    const [swReady, setSwReady] = useState(false);
-    const [swReg, setSwReg] = useState(null);
-    const [permissionStatus, setPermissionStatus] = useState(typeof Notification !== 'undefined' ? Notification.permission : 'default');
-    const [pushStatus, setPushStatus] = useState('idle'); // 'idle' | 'subscribed' | 'error'
-    const [pushError, setPushError] = useState('');
     const [myPrincipal, setMyPrincipal] = useState('');
-    // Identity/storage diagnostics
-    const [idStorageSource, setIdStorageSource] = useState('');
-    const [idStorageError, setIdStorageError] = useState('');
-    const [persistGranted, setPersistGranted] = useState(null); // null | boolean
-    const [persistSupported, setPersistSupported] = useState(false);
+    const [isSubscribed, setIsSubscribed] = useState(false);
+    const [localNotifError, setLocalNotifError] = useState(null);
+    const [isNotifWorking, setIsNotifWorking] = useState(false);
+    const [mobileNonPwa, setMobileNonPwa] = useState(false);
 
     const SESSION_TIMEOUT_MS = 20 * 60 * 1000; // Keep in sync with backend
 
@@ -202,11 +167,7 @@ function App() {
     useEffect(() => {
         (async () => {
             try {
-                const identity = await getOrCreateIdentity((diag) => {
-                    if (!diag) return;
-                    if (diag.source) setIdStorageSource(diag.source);
-                    if (diag.error) setIdStorageError(diag.error);
-                });
+                const identity = await getOrCreateIdentity();
                 try {
                     setMyPrincipal(identity.getPrincipal().toText());
                 } catch (_) {
@@ -226,104 +187,64 @@ function App() {
                         console.warn('fetchRootKey failed', e);
                     }
                 }
+                setAgent(agent);
                 const ca = createChatActor(chatCanisterId, {agent});
                 chatActorRef.current = ca;
                 setChatActor(ca);
-                const na = createNotificationsActor(notificationsCanisterId, {agent});
-                notificationsActorRef.current = na;
-                setNotificationsActor(na);
                 try {
-                    const key = await na.getVapidPublicKey();
-                    if (typeof key === 'string' && key.length > 0) {
-                        setVapidPublicKey(key);
+                    const ua = navigator.userAgent || '';
+                    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua) ||
+                        // iPadOS 13+ may report as Mac, use touch points heuristic
+                        (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+                    const isStandalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
+                        (typeof navigator !== 'undefined' && 'standalone' in navigator && navigator.standalone === true);
+                    const mobileNotPwa = !!isMobile && !isStandalone;
+                    setMobileNonPwa(mobileNotPwa);
+                    if (mobileNotPwa) {
+                        setLocalNotifError('In order to get working push notifications on mobile, open this app as PWA');
                     } else {
-                        console.warn('getVapidPublicKey returned empty value');
+                        icWebPush.setDebug(true);
+                        setIsNotifWorking(true);
+                        icWebPush.init({
+                            applicationCanisterId: chatCanisterId, agent, serviceWorkerPath: '/sw.js'
+                        });
+                        icWebPush.ensureSubscribed({requestPermissionIfNeeded: true})
+                            .catch((err) => {
+                                console.error(err);
+                                setIsSubscribed(false);
+                                setLocalNotifError('"ensureSubscribed" failed: ' + (err?.message || String(err)));
+                            })
+                            .finally(async () => {
+                                try {
+                                    const sub = await icWebPush.isSubscribed();
+                                    setIsSubscribed(!!sub);
+                                } catch (_) {
+                                } finally {
+                                    setIsNotifWorking(false);
+                                }
+                            });
                     }
-                } catch (e) {
-                    console.warn('Failed to fetch VAPID public key', e);
+                } catch (_) {
+                    // ignore
                 }
             } catch (e) {
                 console.error('Failed to init identity/actor', e);
-                setIdStorageError((prev) => prev ? prev + ' | ' + (e?.message || String(e)) : (e?.message || String(e)));
-            }
-        })();
-    }, []);
-
-    // Register Service Worker on first load (no permission request on iOS without user gesture)
-    useEffect(() => {
-        (async () => {
-            if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-                console.warn('Push notifications not supported in this browser.');
-                setPushError('Push notifications not supported on this device/browser');
-                return;
-            }
-            try {
-                const reg = await navigator.serviceWorker.register('/sw.js');
-                setSwReg(reg);
-                await navigator.serviceWorker.ready;
-                setSwReady(true);
-                setPermissionStatus(typeof Notification !== 'undefined' ? Notification.permission : 'default');
-
-                // If already subscribed (e.g., after reinstall), send to backend
-                try {
-                    const sub = await reg.pushManager.getSubscription();
-                    if (sub) {
-                        const p256dh = arrayBufferToBase64Url(sub.getKey('p256dh'));
-                        const auth = arrayBufferToBase64Url(sub.getKey('auth'));
-                        const endpoint = sub.endpoint;
-                        const expirationTime = sub.expirationTime; // may be null
-                        const payload = {
-                            endpoint,
-                            expirationTime: expirationTime === null ? [] : [Number(expirationTime)],
-                            keys: {p256dh, auth},
-                        };
-                        if (notificationsActorRef.current) {
-                            await notificationsActorRef.current.subscribe(Principal.fromText(chatCanisterId), payload);
-                            setPushStatus('subscribed');
-                        }
-                    }
-                } catch (e) {
-                    console.warn('Existing push subscription check failed', e);
-                }
-            } catch (e) {
-                console.warn('Service worker registration failed', e);
-                setPushError('Service worker registration failed: ' + (e?.message || e));
+                setIsNotifWorking(false);
             }
         })();
     }, []);
 
     // Request persistent storage (helps Safari/iOS and desktop not evict data)
     useEffect(() => {
-        let cancelled = false;
         (async () => {
-            try {
-                if (!('storage' in navigator) || !navigator.storage || !navigator.storage.persist) {
-                    if (!cancelled) setPersistSupported(false);
-                    return;
+            if (navigator.storage?.persist) {
+                try {
+                    await navigator.storage.persist();
+                } catch (_) {
                 }
-                setPersistSupported(true);
-                // First check if already persisted
-                if (navigator.storage.persisted) {
-                    try {
-                        const already = await navigator.storage.persisted();
-                        if (!cancelled) setPersistGranted(!!already);
-                    } catch (_) {
-                    }
-                }
-                // Request persistence if not already granted
-                if (navigator.storage.persist) {
-                    try {
-                        const granted = await navigator.storage.persist();
-                        if (!cancelled) setPersistGranted(!!granted);
-                    } catch (_) {
-                    }
-                }
-            } catch (e) {
-                if (!cancelled) setIdStorageError((prev) => prev ? prev + ' | persist() error: ' + (e?.message || String(e)) : 'persist() error: ' + (e?.message || String(e)));
             }
         })();
         return () => {
-            cancelled = true;
         };
     }, []);
 
@@ -357,150 +278,79 @@ function App() {
         };
     }, []);
 
-    // User-gesture flow to enable push on iOS
-    async function enablePush() {
+    async function refreshIsSubscribed() {
         try {
-            setPushError('');
-            if (!swReg) {
-                // Ensure SW is ready
-                const reg = await navigator.serviceWorker.register('/sw.js');
-                setSwReg(reg);
-                await navigator.serviceWorker.ready;
-                setSwReady(true);
-            }
-            const perm = await Notification.requestPermission();
-            setPermissionStatus(perm);
-            if (perm !== 'granted') {
-                setPushStatus('error');
-                setPushError('Notification permission not granted');
-                return;
-            }
-
-            let currentKey = vapidPublicKey;
-            if (!currentKey || currentKey.length === 0) {
-                try {
-                    if (notificationsActorRef.current) {
-                        const fetched = await notificationsActorRef.current.getVapidPublicKey();
-                        if (typeof fetched === 'string' && fetched.length > 0) {
-                            currentKey = fetched;
-                            setVapidPublicKey(fetched);
-                        }
-                    }
-                } catch (_) { /* ignore; will error below if still missing */ }
-            }
-            if (!currentKey || currentKey.length === 0) {
-                setPushStatus('error');
-                setPushError('VAPID public key not available yet. Please try again in a moment.');
-                return;
-            }
-
-            const LAST_VAPID_KEY_STORAGE = 'chat.lastVapidPublicKey';
-            const doSubscribe = async () => {
-                return await swReg.pushManager.subscribe({
-                    userVisibleOnly: true,
-                    applicationServerKey: urlBase64ToUint8Array(currentKey),
-                });
-            };
-
-            let sub = null;
-            try {
-                sub = await doSubscribe();
-            } catch (e1) {
-                const msg = e1?.message || '';
-                if (e1?.name === 'InvalidStateError' || msg.includes('different applicationServerKey')) {
-                    try {
-                        const existing = await swReg.pushManager.getSubscription();
-                        if (existing) {
-                            try { await existing.unsubscribe(); } catch (_) {}
-                        }
-                    } catch (_) {}
-                    sub = await doSubscribe();
-                } else {
-                    const existing = await swReg.pushManager.getSubscription();
-                    if (existing) {
-                        sub = existing;
-                    } else {
-                        throw e1;
-                    }
-                }
-            }
-
-            try { localStorage.setItem(LAST_VAPID_KEY_STORAGE, currentKey); } catch (_) {}
-
-            const p256dh = arrayBufferToBase64Url(sub.getKey('p256dh'));
-            const auth = arrayBufferToBase64Url(sub.getKey('auth'));
-            const endpoint = sub.endpoint;
-            const expirationTime = sub.expirationTime;
-            const payload = {
-                endpoint,
-                expirationTime: expirationTime === null ? [] : [Number(expirationTime)],
-                keys: {p256dh, auth},
-            };
-            if (notificationsActorRef.current) {
-                await notificationsActorRef.current.subscribe(Principal.fromText(chatCanisterId), payload);
-                try { localStorage.setItem('chat.lastPushEndpoint', endpoint); } catch (_) {}
-                setPushStatus('subscribed');
-            } else {
-                setPushStatus('error');
-                setPushError('Backend actor not ready; try again in a moment');
-            }
-        } catch (e) {
-            console.warn('Enable push failed', e);
-            setPushStatus('error');
-            setPushError(e?.message || String(e));
+            const sub = await icWebPush.isSubscribed();
+            setIsSubscribed(!!sub);
+        } catch (_) {
         }
     }
 
-    async function disablePush() {
+    async function handleSubscribe() {
+        setLocalNotifError(null);
+        setIsNotifWorking(true);
         try {
-            setPushError('');
-            let sub = null;
-            if (swReg) {
-                try {
-                    sub = await swReg.pushManager.getSubscription();
-                } catch (_) {
-                    // pass
-                }
-            }
-            let endpoint = null;
-            if (sub && sub.endpoint) endpoint = sub.endpoint;
-            if (!endpoint) {
-                try { endpoint = localStorage.getItem('chat.lastPushEndpoint') || null; } catch (_) {}
-            }
-
-            if (endpoint && notificationsActorRef.current) {
-                try {
-                    await notificationsActorRef.current.unsubscribe(Principal.fromText(chatCanisterId), endpoint);
-                } catch (e) {
-                    setPushError('Backend unsubscribe failed: ' + (e?.message || String(e)));
-                }
-            }
-
-            if (sub) {
-                try { await sub.unsubscribe(); } catch (_) {}
-            }
-
-            try { localStorage.removeItem('chat.lastPushEndpoint'); } catch (_) {}
-
-            setPushStatus('idle');
+            await icWebPush.subscribe({ requestPermissionIfNeeded: true });
         } catch (e) {
-            setPushError(e?.message || String(e));
+            console.error('Subscribe failed: ' + (e?.message || String(e)));
+            setLocalNotifError('Subscribe failed: ' + (e?.message || String(e)));
+        } finally {
+            await refreshIsSubscribed();
+            setIsNotifWorking(false);
         }
+    }
+
+    async function handleUnsubscribe() {
+        setIsNotifWorking(true);
+        try {
+            await icWebPush.unsubscribe();
+        } catch (e) {
+            console.error('Unsubscribe failed: ' + (e?.message || String(e)));
+            // Not treating as an error for the label; state will reflect after refresh
+        } finally {
+            await refreshIsSubscribed();
+            setIsNotifWorking(false);
+        }
+    }
+
+    async function findIcWebPushRegistration() {
+        try {
+            if (!('serviceWorker' in navigator)) return null;
+            // Try current scope first
+            if (navigator.serviceWorker.getRegistration) {
+                const reg = await navigator.serviceWorker.getRegistration();
+                if (reg && (reg?.active?.scriptURL?.includes('ic-web-push-sw.js') || reg?.scope?.endsWith('/ic-web-push/'))) {
+                    return reg;
+                }
+            }
+            // Fallback: scan all registrations
+            if (navigator.serviceWorker.getRegistrations) {
+                const regs = await navigator.serviceWorker.getRegistrations();
+                const match = regs.find(r => r?.active?.scriptURL?.includes('ic-web-push-sw.js') || r?.scope?.endsWith('/ic-web-push/'));
+                if (match) return match;
+            }
+        } catch (_) {
+        }
+        return null;
     }
 
     async function testLocalNotification() {
+        setLocalNotifError(null);
         try {
-            if (!swReady || !swReg) {
-                setPushError('Service worker not ready');
+            const reg = await findIcWebPushRegistration();
+            if (!reg) {
+                setLocalNotifError('Service worker not ready');
                 return;
             }
-            if (permissionStatus !== 'granted') {
-                setPushError('Permission not granted');
+            if (!isSubscribed) {
+                // Button is disabled in this case, but keep a guard
+                setLocalNotifError('Permission not granted');
                 return;
             }
-            await swReg.showNotification('Local test', {body: 'If you see this, notifications are allowed.'});
+            await reg.showNotification('Local test', {body: 'If you see this, notifications are allowed.'});
+            // Success: leave error as null so the area remains hidden
         } catch (e) {
-            setPushError('Local notification failed: ' + (e?.message || String(e)));
+            setLocalNotifError('Local notification failed: ' + (e?.message || String(e)));
         }
     }
 
@@ -774,54 +624,46 @@ function App() {
     };
 
     if (currentView === 'home') {
-        return (
-            <div className="app">
-                <div className="container">
-                    <h1>canChat</h1>
-                    <p>Create or join a chat room</p>
+        return (<div className="app">
+            <div className="container">
+                <h1>canChat</h1>
+                <p>Create or join a chat room</p>
 
-                    {error && <div className="error">{error}</div>}
+                {error && <div className="error">{error}</div>}
 
-                    <div className="button-group">
-                        <LoadingButton onClick={handleCreateRoom} className="btn btn-primary" isLoading={isCreating}>
-                            Create Room
-                        </LoadingButton>
-                        <button onClick={() => setCurrentView('join')} className="btn btn-secondary">
-                            Join Room
-                        </button>
-                    </div>
+                <div className="button-group">
+                    <LoadingButton onClick={handleCreateRoom} className="btn btn-primary" isLoading={isCreating}>
+                        Create Room
+                    </LoadingButton>
+                    <button onClick={() => setCurrentView('join')} className="btn btn-secondary">
+                        Join Room
+                    </button>
+                </div>
 
-                    {/* PWA / Notifications panel */}
-                    <div className="pwa-panel"
-                         style={{marginTop: '24px', padding: '12px', border: '1px solid #333', borderRadius: '8px'}}>
-                        <h3>Notifications</h3>
-                        <div style={{fontSize: '0.95em', lineHeight: 1.6}}>
-                            <div>Service Worker: {swReady ? 'ready' : 'not ready'}</div>
-                            <div>Permission: {permissionStatus}</div>
-                            <div>Push: {pushStatus}</div>
-                            <div>My principal: {myPrincipal || 'unknown'}</div>
-                            <div>Identity storage: {idStorageSource || 'unknown'}</div>
-                            <div>
-                                Storage
-                                persistence: {persistSupported ? (persistGranted === null ? 'checking…' : (persistGranted ? 'granted' : 'not granted')) : 'unsupported'}
-                            </div>
-                            {idStorageError && <div className="error" style={{marginTop: '8px'}}>Identity storage
-                                error: {idStorageError}</div>}
-                            {pushError && <div className="error" style={{marginTop: '8px'}}>{pushError}</div>}
+                {/* PWA / Notifications panel */}
+                <div className="pwa-panel"
+                     style={{marginTop: '24px', padding: '12px', border: '1px solid #333', borderRadius: '8px'}}>
+                    {isNotifWorking ? (
+                        <div className="button-group" style={{marginTop: '12px'}}>
+                            <button className="btn btn-secondary" disabled>
+                                <span className="spinner" aria-hidden="true"/>
+                                Processing...
+                            </button>
                         </div>
+                    ) : !mobileNonPwa && (
                         <div className="button-group" style={{marginTop: '12px'}}>
                             <button
-                                onClick={enablePush}
+                                onClick={handleSubscribe}
                                 className="btn btn-secondary"
-                                disabled={permissionStatus === 'granted' && pushStatus === 'subscribed'}
+                                disabled={isSubscribed}
                                 title="Enable notifications (required on iOS via a user tap)"
                             >
-                                {permissionStatus === 'granted' && pushStatus === 'subscribed' ? 'Notifications enabled' : 'Enable notifications'}
+                                {isSubscribed ? 'Notifications enabled' : 'Enable notifications'}
                             </button>
                             <button
-                                onClick={disablePush}
+                                onClick={handleUnsubscribe}
                                 className="btn btn-warning"
-                                disabled={pushStatus !== 'subscribed'}
+                                disabled={!isSubscribed}
                                 title="Disable notifications and unregister on server"
                             >
                                 Disable notifications
@@ -829,141 +671,126 @@ function App() {
                             <button
                                 onClick={testLocalNotification}
                                 className="btn"
-                                disabled={!swReady || permissionStatus !== 'granted'}
+                                disabled={!isSubscribed}
                                 title="Show a local test notification"
                             >
                                 Test local notification
                             </button>
                         </div>
-                        <div style={{marginTop: '8px', fontSize: '0.9em', opacity: 0.8}}>
-                            Tip: On iOS, install from Safari via Share → Add to Home Screen, then open the app icon and
-                            tap “Enable notifications”.
-                        </div>
+                    )}
+                    {(mobileNonPwa || localNotifError) && (
+                        <div className="error" style={{marginTop: '8px'}}>{localNotifError}</div>
+                    )}
+                    <div style={{marginTop: '8px', fontSize: '0.9em', opacity: 0.8}}>
+                        Tip: On iOS, install from Safari via Share → Add to Home Screen, then open the app icon and
+                        tap “Enable notifications”.
                     </div>
                 </div>
             </div>
-        );
+        </div>);
     }
 
     if (currentView === 'join') {
-        return (
-            <div className="app">
-                <div className="container">
-                    <h1>Join Room</h1>
-                    <p>Enter the 6-character room code</p>
+        return (<div className="app">
+            <div className="container">
+                <h1>Join Room</h1>
+                <p>Enter the 6-character room code</p>
 
-                    {error && <div className="error">{error}</div>}
+                {error && <div className="error">{error}</div>}
 
-                    <div className="input-group">
-                        <input
-                            type="text"
-                            value={joinCode}
-                            onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-                            placeholder="Enter room code"
-                            maxLength="6"
-                            className="room-code-input"
-                        />
-                        <LoadingButton onClick={handleJoinRoom} className="btn btn-primary" isLoading={isJoining}>
-                            Join
-                        </LoadingButton>
-                    </div>
-
-                    <button onClick={() => setCurrentView('home')} className="btn btn-link">
-                        ← Back to Home
-                    </button>
+                <div className="input-group">
+                    <input
+                        type="text"
+                        value={joinCode}
+                        onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
+                        placeholder="Enter room code"
+                        maxLength="6"
+                        className="room-code-input"
+                    />
+                    <LoadingButton onClick={handleJoinRoom} className="btn btn-primary" isLoading={isJoining}>
+                        Join
+                    </LoadingButton>
                 </div>
+
+                <button onClick={() => setCurrentView('home')} className="btn btn-link">
+                    ← Back to Home
+                </button>
             </div>
-        );
+        </div>);
     }
 
     if (currentView === 'room') {
-        return (
-            <div className="app">
-                <div className="chat-container">
-                    <div className="chat-header">
-                        <div className="room-code-section">
-                            <h2>Room: {roomCode}</h2>
-                            <button
-                                onClick={handleCopyRoomCode}
-                                className={`btn btn-copy ${copySuccess ? 'copied' : ''}`}
-                                title="Copy room link"
-                            >
-                                {copySuccess ? '✓ Copied!' : '📋 Copy Link'}
-                            </button>
-                        </div>
-                        <div className="room-info">
-                            <span>{room?.participants.length} participant(s)</span>
-                            <span className={`timer-badge ${isExpired ? 'expired' : ''}`}
-                                  title="Time left in this session">
-                {remainingMs == null ? '—:—' : (
-                    (() => {
-                        const total = Math.max(remainingMs, 0);
-                        const m = Math.floor(total / 60000);
-                        const s = Math.floor((total % 60000) / 1000);
-                        return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-                    })()
-                )}
+        return (<div className="app">
+            <div className="chat-container">
+                <div className="chat-header">
+                    <div className="room-code-section">
+                        <h2>Room: {roomCode}</h2>
+                        <button
+                            onClick={handleCopyRoomCode}
+                            className={`btn btn-copy ${copySuccess ? 'copied' : ''}`}
+                            title="Copy room link"
+                        >
+                            {copySuccess ? '✓ Copied!' : '📋 Copy Link'}
+                        </button>
+                    </div>
+                    <div className="room-info">
+                        <span>{room?.participants.length} participant(s)</span>
+                        <span className={`timer-badge ${isExpired ? 'expired' : ''}`}
+                              title="Time left in this session">
+                {remainingMs == null ? '—:—' : ((() => {
+                    const total = Math.max(remainingMs, 0);
+                    const m = Math.floor(total / 60000);
+                    const s = Math.floor((total % 60000) / 1000);
+                    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+                })())}
               </span>
-                            {isCreator && (
-                                <button onClick={handleEndRoom} className="btn btn-small" disabled={isExpired}>
-                                    End Room
-                                </button>
-                            )}
-                            <button onClick={handleLeaveRoom} className="btn btn-small">
-                                Leave Room
-                            </button>
-                        </div>
+                        {isCreator && (<button onClick={handleEndRoom} className="btn btn-small" disabled={isExpired}>
+                            End Room
+                        </button>)}
+                        <button onClick={handleLeaveRoom} className="btn btn-small">
+                            Leave Room
+                        </button>
                     </div>
-
-                    {error && <div className="error">{error}</div>}
-
-                    <div className="messages-container">
-                        {messages.length === 0 ? (
-                            <div className="no-messages">No messages yet. Start the conversation!</div>
-                        ) : (
-                            messages.map((message) => (
-                                <div key={message.id}
-                                     className={`message ${principalToText(message.sender) === myPrincipal ? 'own' : 'other'}`}>
-                                    <div className="message-header">
-                                        <span className="sender">{formatMessageSender(message)}</span>
-                                        <span className="timestamp">{formatTime(message.timestamp)}</span>
-                                    </div>
-                                    <div className="message-content">{message.content}</div>
-                                </div>
-                            ))
-                        )}
-                        <div ref={messagesEndRef}/>
-                    </div>
-
-                    <form onSubmit={handleSendMessage} className="message-form">
-                        <input
-                            type="text"
-                            value={newMessage}
-                            onChange={(e) => setNewMessage(e.target.value)}
-                            placeholder="Type your message..."
-                            className="message-input"
-                            disabled={isExpired || isSending}
-                        />
-                        <LoadingButton type="submit" className="btn btn-primary" isLoading={isSending}
-                                       disabled={isExpired}>
-                            Send
-                        </LoadingButton>
-                    </form>
-                    {showExpiredModal && createPortal(
-                        (
-                            <div className="modal-overlay" role="dialog" aria-modal="true">
-                                <div className="modal">
-                                    <h3>Session Ended</h3>
-                                    <p>The room session has expired. Please return to the home page.</p>
-                                    <button className="btn btn-primary" onClick={handleLeaveRoom}>Go to Home</button>
-                                </div>
-                            </div>
-                        ),
-                        document.body
-                    )}
                 </div>
+
+                {error && <div className="error">{error}</div>}
+
+                <div className="messages-container">
+                    {messages.length === 0 ? (<div className="no-messages">No messages yet. Start the
+                        conversation!</div>) : (messages.map((message) => (<div key={message.id}
+                                                                                className={`message ${principalToText(message.sender) === myPrincipal ? 'own' : 'other'}`}>
+                        <div className="message-header">
+                            <span className="sender">{formatMessageSender(message)}</span>
+                            <span className="timestamp">{formatTime(message.timestamp)}</span>
+                        </div>
+                        <div className="message-content">{message.content}</div>
+                    </div>)))}
+                    <div ref={messagesEndRef}/>
+                </div>
+
+                <form onSubmit={handleSendMessage} className="message-form">
+                    <input
+                        type="text"
+                        value={newMessage}
+                        onChange={(e) => setNewMessage(e.target.value)}
+                        placeholder="Type your message..."
+                        className="message-input"
+                        disabled={isExpired || isSending}
+                    />
+                    <LoadingButton type="submit" className="btn btn-primary" isLoading={isSending}
+                                   disabled={isExpired}>
+                        Send
+                    </LoadingButton>
+                </form>
+                {showExpiredModal && createPortal((<div className="modal-overlay" role="dialog" aria-modal="true">
+                    <div className="modal">
+                        <h3>Session Ended</h3>
+                        <p>The room session has expired. Please return to the home page.</p>
+                        <button className="btn btn-primary" onClick={handleLeaveRoom}>Go to Home</button>
+                    </div>
+                </div>), document.body)}
             </div>
-        );
+        </div>);
     }
 
     return null;

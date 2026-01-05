@@ -28,6 +28,11 @@ export const idlFactory = ({ IDL }) => {
     'collect' : IDL.Func([], [IDL.Vec(Notification)], []),
     'deregisterApplication' : IDL.Func([IDL.Principal], [], ['oneway']),
     'getVapidPublicKey' : IDL.Func([], [IDL.Text], ['query']),
+    'hasSubscription' : IDL.Func(
+        [IDL.Principal, IDL.Text],
+        [IDL.Bool],
+        ['query'],
+      ),
     'http_request' : IDL.Func([HttpRequest], [HttpResponse], ['query']),
     'isQueueEmpty' : IDL.Func([], [IDL.Bool], ['query']),
     'registerApplication' : IDL.Func([IDL.Principal], [], ['oneway']),

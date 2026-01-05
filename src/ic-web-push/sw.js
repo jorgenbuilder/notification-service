@@ -19,31 +19,22 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('push', (event) => {
-  // The payload is expected to be JSON with fields { title, content, url }
-  let data = {};
   try {
-    if (event.data) {
-      data = event.data.json();
-    }
+    const data = event.data ? event.data.json() : {};
+    const title = data.title || 'New notification';
+    const urlFromPayload = (data && data.data && data.data.url) || data.url || '/';
+    const options = {
+      body: data.body || 'You have a new message',
+      icon: '/favicon.ico',
+      badge: '/favicon.ico',
+      data: { ...(data.data || {}), url: urlFromPayload },
+      actions: data.actions || [],
+      requireInteraction: !!data.requireInteraction,
+    };
+    event.waitUntil(self.registration.showNotification(title, options));
   } catch (e) {
-    // If payload isn't JSON, show a generic message
-    data = { title: 'New notification', content: event.data?.text?.() ?? 'You have a new message.' };
+    event.waitUntil(self.registration.showNotification('New notification', { body: 'You have a new notification', icon: '/favicon.ico' }));
   }
-
-  const title = data.title || 'New notification';
-  const body = data.content || '';
-  const url = data.url || '/';
-  const icon = data.icon || '/favicon.ico';
-  const badge = data.badge || undefined;
-
-  const options = {
-    body,
-    icon,
-    badge,
-    data: { url },
-  };
-
-  event.waitUntil(self.registration.showNotification(title, options));
 });
 
 self.addEventListener('notificationclick', (event) => {

@@ -26,6 +26,7 @@ export interface NotificationCanister {
   'collect' : ActorMethod<[], Array<Notification>>,
   'deregisterApplication' : ActorMethod<[Principal], undefined>,
   'getVapidPublicKey' : ActorMethod<[], string>,
+  'hasSubscription' : ActorMethod<[Principal, string], boolean>,
   'http_request' : ActorMethod<[HttpRequest], HttpResponse>,
   'isQueueEmpty' : ActorMethod<[], boolean>,
   'registerApplication' : ActorMethod<[Principal], undefined>,
