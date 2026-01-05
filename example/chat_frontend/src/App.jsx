@@ -643,6 +643,7 @@ function App() {
                 {/* PWA / Notifications panel */}
                 <div className="pwa-panel"
                      style={{marginTop: '24px', padding: '12px', border: '1px solid #333', borderRadius: '8px'}}>
+                    <div>My principal: {myPrincipal || 'unknown'}</div>
                     {isNotifWorking ? (
                         <div className="button-group" style={{marginTop: '12px'}}>
                             <button className="btn btn-secondary" disabled>
