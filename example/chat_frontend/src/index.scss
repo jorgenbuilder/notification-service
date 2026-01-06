@@ -204,7 +204,7 @@ p {
   border-radius: 8px;
   font-weight: 700;
   letter-spacing: 1px;
-  min-width: 58px;
+  min-width: 78px;
   text-align: center;
   border: 1px solid rgba(255, 255, 255, 0.3);
 }
@@ -588,4 +588,114 @@ p {
 /* Center spinner when loading inside circular button */
 .message-form .send-btn.is-loading .spinner {
   margin-right: 0; /* remove default right margin */
+}
+
+
+.chat-header .room-code-section .btn.btn-link {
+  color: #fff;
+}
+.chat-header .room-code-section .btn.btn-link:hover,
+.chat-header .room-code-section .btn.btn-link:focus {
+  color: #fff;
+}
+.chat-header .room-code-section .btn.btn-link:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
+.chat-header .room-code-section .btn.btn-link.back-btn {
+  text-decoration: none;
+  display: inline-flex;
+  padding: 8px;
+  min-width: auto;
+  line-height: 1;
+}
+.chat-header .room-code-section .btn.btn-link.back-btn:hover,
+.chat-header .room-code-section .btn.btn-link.back-btn:focus {
+  text-decoration: none;
+}
+.chat-header .room-code-section .btn.btn-link.back-btn svg {
+  width: 22px;
+  height: 22px;
+  fill: currentColor;
+  display: block;
+}
+
+.join-container .btn.btn-link.join-back-btn {
+  color: #667eea;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 8px;
+  min-width: auto;
+  line-height: 1;
+}
+.join-container .btn.btn-link.join-back-btn:hover,
+.join-container .btn.btn-link.join-back-btn:focus {
+  color: #764ba2;
+  text-decoration: none;
+}
+.join-container .btn.btn-link.join-back-btn:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+.join-container .btn.btn-link.join-back-btn svg {
+  width: 22px;
+  height: 22px;
+  fill: currentColor;
+  display: block;
+}
+
+.join-container {
+  position: relative;
+}
+
+.join-container .btn.btn-link.join-back-btn {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+}
+
+@media (max-width: 600px) and (hover: none) and (pointer: coarse) {
+  .app.app--chat {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;   /* fallback */
+    height: 100dvh;  /* dynamic viewport */
+    height: 100svh;  /* prefer small viewport to follow keyboard */
+    align-items: stretch;
+    justify-content: stretch;
+    overflow: hidden;
+    background: #fff;
+  }
+
+  .app.app--chat .chat-container {
+    position: absolute;
+    inset: 0;
+    width: auto;
+    max-width: none;
+    height: auto;
+    max-height: none;
+    border-radius: 0;
+    box-shadow: none;
+    margin: 0;
+  }
+
+  .chat-header .room-code-section .btn.btn-link {
+    padding-left: 20px !important;
+    margin-bottom: -40px;
+    width: 100vw;
+    max-width: unset;
+    margin-right: 0 !important;
+  }
+
+  .message-form {
+    padding-bottom: 50px; // fight with iOS bar above keyboard
+  }
+
+  .chat-header {
+    padding-top: 50px; // fight with iOS screen cutout area
+  }
+
 }

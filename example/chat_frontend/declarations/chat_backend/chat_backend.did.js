@@ -43,6 +43,7 @@ export const idlFactory = ({ IDL }) => {
     'getRoom' : IDL.Func([RoomCode], [IDL.Opt(Room)], ['query']),
     'joinRoom' : IDL.Func([RoomCode], [JoinRoomResult], []),
     'leaveRoom' : IDL.Func([RoomCode], [IDL.Bool], []),
+    'myRoomCodes' : IDL.Func([], [IDL.Vec(RoomCode)], ['query']),
     'sendMessage' : IDL.Func([RoomCode, IDL.Text], [SendMessageResult], []),
   });
 };

@@ -64,11 +64,11 @@ persistent actor canChatBackend {
   // State - Make all counters persistent
   private flexible var rooms : HashMap.HashMap<RoomCode, Room> = HashMap.HashMap<RoomCode, Room>(10, Text.equal, Text.hash);
   private flexible var usersByPrincipal : HashMap.HashMap<Principal, User> = HashMap.HashMap<Principal, User>(10, Principal.equal, Principal.hash);
-  // Track how many active rooms each principal is part of (within this app)
-  private flexible var principalActiveRooms : HashMap.HashMap<Principal, Nat> = HashMap.HashMap<Principal, Nat>(10, Principal.equal, Principal.hash);
+  // Track active rooms each principal is part of (within this app)
+  private flexible var principalActiveRooms : HashMap.HashMap<Principal, [RoomCode]> = HashMap.HashMap<Principal, [RoomCode]>(10, Principal.equal, Principal.hash);
   private flexible var messageIdCounter : Nat = 0;
   private flexible var userCounter : Nat = 0;
-  private let SESSION_TIMEOUT : Int = 20 * 60 * 1000_000_000; // 20 minutes in nanoseconds
+  private let SESSION_TIMEOUT : Int = 24 * 60 * 60 * 1000_000_000; // 24 hours in nanoseconds
   private let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
   transient let NotificationsActor = NotificationDelegate.getActor();
@@ -189,20 +189,23 @@ persistent actor canChatBackend {
   };
 
   // track active room membership counts per principal
-  private func incPrincipalRooms(p : Principal) {
+  private func incPrincipalRooms(p : Principal, roomCode : RoomCode) {
     switch (principalActiveRooms.get(p)) {
-      case (?n) principalActiveRooms.put(p, n + 1);
-      case null principalActiveRooms.put(p, 1);
+      case (?codes) {
+        principalActiveRooms.put(p, Array.tabulate<RoomCode>(codes.size() + 1, func(i) = if (i < codes.size()) { codes[i] } else { roomCode }));
+      };
+      case null principalActiveRooms.put(p, [roomCode]);
     };
   };
 
-  private func decPrincipalRooms(p : Principal) : async* () {
+  private func decPrincipalRooms(p : Principal, roomCode : RoomCode) : async* () {
     switch (principalActiveRooms.get(p)) {
-      case (?n) {
-        if (n <= 1) {
-          principalActiveRooms.delete(p);
-        } else {
-          principalActiveRooms.put(p, n - 1);
+      case (?codes) {
+        switch (Array.indexOf(roomCode, codes, Text.equal)) {
+          case (?idx) {
+            principalActiveRooms.put(p, Array.tabulate<RoomCode>(codes.size() - 1, func(i) = if (i < idx) { codes[i] } else { codes[i + 1] }));
+          };
+          case (null) {};
         };
       };
       case null {};
@@ -211,7 +214,7 @@ persistent actor canChatBackend {
 
   private func deleteRoomAndAdjust(code : RoomCode, room : Room) : async* () {
     for (u in Array.vals<User>(room.participants)) {
-      await* decPrincipalRooms(u.principal);
+      await* decPrincipalRooms(u.principal, code);
     };
     rooms.delete(code);
   };
@@ -246,8 +249,13 @@ persistent actor canChatBackend {
     };
 
     rooms.put(roomCode, room);
-    incPrincipalRooms(user.principal);
+    incPrincipalRooms(user.principal, roomCode);
     #Ok({ roomCode; room });
+  };
+
+  public query ({ caller }) func myRoomCodes() : async [RoomCode] {
+    let ?roomCodes = principalActiveRooms.get(caller) else return [];
+    roomCodes;
   };
 
   // returns room only if caller has already joined it
@@ -288,7 +296,7 @@ persistent actor canChatBackend {
         };
 
         rooms.put(roomCode, updatedRoom);
-        incPrincipalRooms(user.principal);
+        incPrincipalRooms(user.principal, roomCode);
         #Ok({ room = updatedRoom });
       };
       case null {
@@ -387,7 +395,7 @@ persistent actor canChatBackend {
       case (?room) {
         let leaving = findUserByPrincipal(room.participants, msg.caller);
         switch (leaving) {
-          case (?u) await* decPrincipalRooms(u.principal);
+          case (?u) await* decPrincipalRooms(u.principal, roomCode);
           case (null) {};
         };
         let updatedParticipants = Array.filter<User>(room.participants, func(u) = u.principal != msg.caller);

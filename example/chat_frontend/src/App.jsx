@@ -160,13 +160,17 @@ function App() {
     const [isJoining, setIsJoining] = useState(false);
     const [isSending, setIsSending] = useState(false);
 
+    // Previously joined room codes
+    const [myCodes, setMyCodes] = useState([]);
+    const [loadingMyCodes, setLoadingMyCodes] = useState(false);
+
     const [myPrincipal, setMyPrincipal] = useState('');
     const [isSubscribed, setIsSubscribed] = useState(false);
     const [localNotifError, setLocalNotifError] = useState(null);
     const [isNotifWorking, setIsNotifWorking] = useState(false);
     const [mobileNonPwa, setMobileNonPwa] = useState(false);
 
-    const SESSION_TIMEOUT_MS = 20 * 60 * 1000; // Keep in sync with backend
+    const SESSION_TIMEOUT_MS = 24 * 60 * 60 * 1000; // Keep in sync with backend
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({behavior: "smooth"});
@@ -203,6 +207,7 @@ function App() {
                 const ca = createChatActor(chatCanisterId, {agent});
                 chatActorRef.current = ca;
                 setChatActor(ca);
+                refreshMyCodes().then();
                 try {
                     const ua = navigator.userAgent || '';
                     const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua) ||
@@ -549,8 +554,12 @@ function App() {
             if (!options?.silent) setError('');
             if (!chatActorRef.current) throw new Error('Actor not ready');
             let result = await chatActorRef.current.getJoinedRoom(codeRaw);
-            if ('Err' in result && result.Err === "Not joined") {
-                result = await chatActorRef.current.joinRoom(codeRaw);
+            if ('Err' in result) {
+                if (result.Err === "Not joined") {
+                    result = await chatActorRef.current.joinRoom(codeRaw);
+                } else if (result.Err === "Room has expired") {
+                    chatActorRef.current.joinRoom(codeRaw).then(); // make canister clean up the room
+                }
             }
             if ('Ok' in result) {
                 setRoomCode(codeRaw);
@@ -561,6 +570,7 @@ function App() {
                 setCurrentView('room');
                 setShowExpiredModal(false);
                 setIsExpired(false);
+                refreshMyCodes().then();
             } else {
                 setError(result.Err);
             }
@@ -602,6 +612,25 @@ function App() {
         }
     };
 
+    const refreshMyCodes = async () => {
+        if (!chatActorRef.current) return;
+        try {
+            setLoadingMyCodes(true);
+            const codes = await chatActorRef.current.myRoomCodes();
+            setMyCodes(Array.isArray(codes) ? codes : []);
+        } catch (e) {
+            console.warn('refresh myRoomCodes failed', e);
+        } finally {
+            setLoadingMyCodes(false);
+        }
+    };
+
+    useEffect(() => {
+        if (currentView === 'join' && chatActorRef.current) {
+            refreshMyCodes().catch(() => {});
+        }
+    }, [currentView]);
+
     const handleLeaveRoom = async () => {
         if (chatActorRef.current) {
             chatActorRef.current.leaveRoom(roomCode).catch(err => console.error('Error leaving room:', err));
@@ -623,6 +652,7 @@ function App() {
         const basePath = '/' + segs.join('/');
         const finalBase = basePath === '' ? '/' : basePath;
         window.history.pushState({}, '', finalBase);
+        refreshMyCodes().catch(() => {});
     };
 
     const handleCopyRoomCode = async () => {
@@ -745,7 +775,7 @@ function App() {
 
     if (currentView === 'join') {
         return (<div className="app">
-            <div className="container">
+            <div className="container join-container">
                 <h1>Join Room</h1>
                 <p>Enter the 6-character room code</p>
 
@@ -765,18 +795,65 @@ function App() {
                     </LoadingButton>
                 </div>
 
-                <button onClick={() => setCurrentView('home')} className="btn btn-link">
-                    ← Back to Home
+                {loadingMyCodes ? (
+                    <div className="joined-rooms" style={{marginTop: '16px'}}>
+                        <div style={{display: 'flex', alignItems: 'center', gap: '8px'}}>
+                            <span className="spinner" aria-hidden="true"/>
+                        </div>
+                    </div>
+                ) : (myCodes && myCodes.length > 0) ? (
+                    <div className="joined-rooms" style={{marginTop: '16px'}}>
+                        <div style={{display: 'flex', alignItems: 'center', gap: '8px'}}>
+                            <h3 style={{margin: 0}}>Previously joined</h3>
+                        </div>
+                        <div className="codes-list" style={{marginTop: '8px', display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'space-between'}}>
+                            {myCodes.map((code) => (
+                                <button
+                                    key={code}
+                                    className="btn btn-secondary"
+                                    onClick={() => {
+                                        setJoinCode(String(code).toUpperCase());
+                                        handleJoinRoom(String(code).toUpperCase());
+                                    }}
+                                    title={`Join room ${code}`}
+                                >
+                                    {String(code).toUpperCase()}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                ) : null}
+
+                <button
+                    onClick={() => setCurrentView('home')}
+                    className="btn btn-link back-btn join-back-btn"
+                    title="Back to Home"
+                    aria-label="Back to Home"
+                >
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                        <path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"></path>
+                    </svg>
                 </button>
             </div>
         </div>);
     }
 
     if (currentView === 'room') {
-        return (<div className="app">
+        return (<div className="app app--chat">
             <div className="chat-container">
                 <div className="chat-header">
                     <div className="room-code-section">
+                        <button
+                            onClick={() => setCurrentView('join')}
+                            className="btn btn-link back-btn"
+                            title="Back to Join"
+                            aria-label="Back to Join"
+                            style={{ marginRight: '8px' }}
+                        >
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                <path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"></path>
+                            </svg>
+                        </button>
                         <h2>Room: {roomCode}</h2>
                         <button
                             onClick={handleCopyRoomCode}
@@ -792,9 +869,14 @@ function App() {
                               title="Time left in this session">
                 {remainingMs == null ? '—:—' : ((() => {
                     const total = Math.max(remainingMs, 0);
-                    const m = Math.floor(total / 60000);
+                    const h = Math.floor(total / 3600000);
+                    const m = Math.floor((total % 3600000) / 60000);
                     const s = Math.floor((total % 60000) / 1000);
-                    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+                    if (h > 0) {
+                      return `${String(h)}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+                    } else {
+                      return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+                    }
                 })())}
               </span>
                         {isCreator && (<button onClick={handleEndRoom} className="btn btn-small" disabled={isExpired}>

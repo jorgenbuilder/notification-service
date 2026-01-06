@@ -43,6 +43,7 @@ export interface _SERVICE {
   'getRoom' : ActorMethod<[RoomCode], [] | [Room]>,
   'joinRoom' : ActorMethod<[RoomCode], JoinRoomResult>,
   'leaveRoom' : ActorMethod<[RoomCode], boolean>,
+  'myRoomCodes' : ActorMethod<[], Array<RoomCode>>,
   'sendMessage' : ActorMethod<[RoomCode, string], SendMessageResult>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;
