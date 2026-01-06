@@ -130,8 +130,16 @@ function applyMessagesFlickeringGuard(prev, nextList) {
     if (!Array.isArray(prev)) return nextList;
     if (nextList.length < prev.length) return prev;
     if (nextList.length === prev.length && prev.length > 0) {
-        const prevLastTs = Number(prev[prev.length - 1]?.timestamp || 0);
-        const nextLastTs = Number(nextList[nextList.length - 1]?.timestamp || 0);
+        const prevLast = prev[prev.length - 1] || {};
+        const nextLast = nextList[nextList.length - 1] || {};
+        const prevLastId = prevLast.id;
+        const nextLastId = nextLast.id;
+        if (prevLastId != null && nextLastId != null && prevLastId === nextLastId) {
+            // Identical tail, treat as no-op to avoid re-renders that may retrigger scroll logic
+            return prev;
+        }
+        const prevLastTs = Number(prevLast?.timestamp || 0);
+        const nextLastTs = Number(nextLast?.timestamp || 0);
         if (nextLastTs < prevLastTs) return prev;
     }
     return nextList;
@@ -172,13 +180,108 @@ function App() {
 
     const SESSION_TIMEOUT_MS = 24 * 60 * 60 * 1000; // Keep in sync with backend
 
-    const scrollToBottom = () => {
-        messagesEndRef.current?.scrollIntoView({behavior: "smooth"});
+    // Scroll management
+    const messagesContainerRef = useRef(null);
+    const lastMessageIdRef = useRef(null);
+    const sendByMeRef = useRef(false);
+    // Force a one-time scroll when entering the chat view
+    const forceScrollOnEnterRef = useRef(false);
+    // Tracks whether user interacted with the list (e.g., scrolled)
+    const userInteractedRef = useRef(false);
+    // Track previous messages length to detect appends even if IDs are odd
+    const prevLenRef = useRef(0);
+    // Track whether the user is at/near the bottom; helps decide auto-scroll on new messages
+    const stuckToBottomRef = useRef(true);
+
+    const isNearBottom = (el, threshold = 160) => {
+        if (!el) return true;
+        try {
+            const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+            return distance <= threshold;
+        } catch (_) {
+            return true;
+        }
     };
 
     useEffect(() => {
-        scrollToBottom();
+        const container = messagesContainerRef.current;
+        const lastId = messages?.length ? messages[messages.length - 1]?.id : null;
+        const prevLast = lastMessageIdRef.current;
+        const nearBottom = isNearBottom(container, 160);
+        const hasNew = !!(lastId && lastId !== prevLast);
+        const allowForce = !!(forceScrollOnEnterRef.current && !userInteractedRef.current);
+
+        // detect appends by length (covers cases where IDs are new but also when ids behave unexpectedly)
+        const len = Array.isArray(messages) ? messages.length : 0;
+        const prevLen = prevLenRef.current || 0;
+        const appended = len > prevLen;
+        prevLenRef.current = len;
+
+        // remember the latest id
+        lastMessageIdRef.current = lastId;
+
+        // keep a sticky "at bottom" state to handle async rendering
+        if (container) {
+            stuckToBottomRef.current = isNearBottom(container, 160);
+        }
+
+        // Decide if we should auto-scroll now
+        const shouldScroll = (
+            sendByMeRef.current ||
+            // New/append and user is/was at bottom (or force on enter)
+            ((hasNew || appended) && (nearBottom || stuckToBottomRef.current || allowForce)) ||
+            // Force on entry
+            allowForce
+        );
+
+        if (shouldScroll) {
+            requestAnimationFrame(() => {
+                messagesEndRef.current?.scrollIntoView({ behavior: sendByMeRef.current ? 'smooth' : 'auto' });
+            });
+            // reset the one-time enter flag after we acted on it
+            forceScrollOnEnterRef.current = false;
+        }
+        sendByMeRef.current = false;
     }, [messages]);
+
+    // One-time scroll when entering the chat view from other screens
+    useEffect(() => {
+        let clearTimer = null;
+        if (currentView === 'room') {
+            // reset interaction state on enter
+            userInteractedRef.current = false;
+            // set the flag so the messages effect also respects it
+            forceScrollOnEnterRef.current = true;
+            requestAnimationFrame(() => {
+                messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+            });
+            // safety: clear the force flag shortly after mount to avoid late auto-scroll
+            clearTimer = setTimeout(() => {
+                forceScrollOnEnterRef.current = false;
+            }, 600);
+        }
+        return () => {
+            if (clearTimer) clearTimeout(clearTimer);
+        };
+    }, [currentView]);
+
+    // Track user scroll interaction to disable forced auto-scroll once the user scrolls away
+    useEffect(() => {
+        if (currentView !== 'room') return;
+        const el = messagesContainerRef.current;
+        if (!el) return;
+        const onScroll = () => {
+            userInteractedRef.current = true;
+            if (!isNearBottom(el, 80)) {
+                // as soon as the user scrolls away from bottom, cancel any pending forced scroll
+                forceScrollOnEnterRef.current = false;
+            }
+        };
+        el.addEventListener('scroll', onScroll, { passive: true });
+        return () => {
+            el.removeEventListener('scroll', onScroll);
+        };
+    }, [currentView]);
 
     useEffect(() => {
         (async () => {
@@ -505,6 +608,8 @@ function App() {
                 const creatorText = principalToText(result.Ok.room.creator);
                 setIsCreator(creatorText === myPrincipal);
                 setCurrentView('room');
+                // Ensure we scroll to bottom upon entering the chat view
+                forceScrollOnEnterRef.current = true;
                 setShowExpiredModal(false);
                 setIsExpired(false);
             } else {
@@ -568,6 +673,8 @@ function App() {
                 const creatorText = principalToText(result.Ok.room.creator);
                 setIsCreator(creatorText === myPrincipal);
                 setCurrentView('room');
+                // Ensure we scroll to bottom upon entering the chat view
+                forceScrollOnEnterRef.current = true;
                 setShowExpiredModal(false);
                 setIsExpired(false);
                 refreshMyCodes().then();
@@ -582,6 +689,8 @@ function App() {
     };
 
     const handleSendMessage = async (e) => {
+        // Mark that the next scroll should be smooth and forced (message sent by me)
+        sendByMeRef.current = true;
         e.preventDefault();
         if (isSending) return;
         if (!newMessage.trim() || isExpired) return;
@@ -643,16 +752,23 @@ function App() {
         setMessages([]);
         setNewMessage('');
         setError('');
-        // Return to base path (remove any roomId segment from the end of the path)
-        const path = window.location.pathname || '/';
-        const segs = path.split('/').filter(Boolean);
-        if (segs.length && /^[A-Z0-9]{6}$/.test(String(segs[segs.length - 1]).toUpperCase())) {
-            segs.pop();
+        // Ensure URL shows root path
+        try {
+            window.history.replaceState({}, '', '/');
+        } catch (_) {
+            window.location.hash = '#';
         }
-        const basePath = '/' + segs.join('/');
-        const finalBase = basePath === '' ? '/' : basePath;
-        window.history.pushState({}, '', finalBase);
         refreshMyCodes().catch(() => {});
+    };
+
+    const handleBackToJoin = () => {
+        setCurrentView('join');
+        // Ensure URL shows root path when navigating back from chat view
+        try {
+            window.history.replaceState({}, '', '/');
+        } catch (_) {
+            window.location.hash = '#';
+        }
     };
 
     const handleCopyRoomCode = async () => {
@@ -844,7 +960,7 @@ function App() {
                 <div className="chat-header">
                     <div className="room-code-section">
                         <button
-                            onClick={() => setCurrentView('join')}
+                            onClick={handleBackToJoin}
                             className="btn btn-link back-btn"
                             title="Back to Join"
                             aria-label="Back to Join"
@@ -890,7 +1006,7 @@ function App() {
 
                 {error && <div className="error">{error}</div>}
 
-                <div className="messages-container">
+                <div className="messages-container" ref={messagesContainerRef}>
                     {messages.length === 0 ? (<div className="no-messages">No messages yet. Start the
                         conversation!</div>) : (messages.map((message) => (<div key={message.id}
                                                                                 className={`message ${principalToText(message.sender) === myPrincipal ? 'own' : 'other'}`}>

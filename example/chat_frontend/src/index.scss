@@ -4,6 +4,12 @@
   box-sizing: border-box;
 }
 
+html, body {
+  height: 100%;
+  /* Prevent rubber-band overscroll at the page level on modern browsers (including iOS 15+) */
+  overscroll-behavior: none;
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
     'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
@@ -12,6 +18,10 @@ body {
   -moz-osx-font-smoothing: grayscale;
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   min-height: 100vh;
+  /* Lock page scroll; views must provide their own scroll containers */
+  overflow: hidden;
+  /* Ensure touch interactions remain responsive */
+  touch-action: manipulation;
 }
 
 .app {
@@ -20,6 +30,11 @@ body {
   align-items: center;
   justify-content: center;
   padding: 20px;
+  /* Allow views to scroll within the app instead of the page */
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  /* Prevent this container from triggering viewport bounce */
+  overscroll-behavior: contain;
 }
 
 .container {
@@ -42,6 +57,8 @@ body {
   max-width: 800px;
   display: flex;
   flex-direction: column;
+  /* allow inner flex children to scroll (iOS fix) */
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -216,8 +233,16 @@ p {
 
 .messages-container {
   flex: 1;
+  /* Allow flex child to shrink and enable scrolling in flex column containers (fixes iOS/Safari) */
+  min-height: 0;
   padding: 20px;
   overflow-y: auto;
+  /* Smooth momentum scrolling on iOS */
+  -webkit-overflow-scrolling: touch;
+  /* Prevent parent/page from intercepting scroll and bouncing */
+  overscroll-behavior: contain;
+  /* Ensure vertical panning is allowed on touch devices */
+  touch-action: pan-y;
   background: #f8f9fa;
 }
 
@@ -658,7 +683,7 @@ p {
 
 @media (max-width: 600px) and (hover: none) and (pointer: coarse) {
   .app.app--chat {
-    position: fixed;
+    position: relative; /* avoid fixed ancestor to allow inner scrolling on iOS */
     inset: 0;
     width: 100vw;
     height: 100vh;   /* fallback */
@@ -666,7 +691,6 @@ p {
     height: 100svh;  /* prefer small viewport to follow keyboard */
     align-items: stretch;
     justify-content: stretch;
-    overflow: hidden;
     background: #fff;
   }
 
@@ -680,6 +704,8 @@ p {
     border-radius: 0;
     box-shadow: none;
     margin: 0;
+    /* enable flex child scrolling */
+    min-height: 0;
   }
 
   .chat-header .room-code-section .btn.btn-link {
