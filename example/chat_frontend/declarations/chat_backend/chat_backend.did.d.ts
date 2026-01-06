@@ -6,6 +6,8 @@ export type CreateRoomResult = {
     'Ok' : { 'room' : Room, 'roomCode' : RoomCode }
   } |
   { 'Err' : string };
+export type GetJoinedRoomResult = { 'Ok' : { 'room' : Room } } |
+  { 'Err' : string };
 export type JoinRoomResult = { 'Ok' : { 'room' : Room } } |
   { 'Err' : string };
 export interface Message {
@@ -36,6 +38,7 @@ export interface _SERVICE {
   'createRoom' : ActorMethod<[], CreateRoomResult>,
   'endRoom' : ActorMethod<[RoomCode], boolean>,
   'getDebugInfo' : ActorMethod<[RoomCode], string>,
+  'getJoinedRoom' : ActorMethod<[RoomCode], GetJoinedRoomResult>,
   'getMessages' : ActorMethod<[RoomCode], Array<Message>>,
   'getRoom' : ActorMethod<[RoomCode], [] | [Room]>,
   'joinRoom' : ActorMethod<[RoomCode], JoinRoomResult>,

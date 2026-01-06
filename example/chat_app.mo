@@ -51,6 +51,11 @@ persistent actor canChatBackend {
     #Err : Text;
   };
 
+  public type GetJoinedRoomResult = {
+    #Ok : { room : Room };
+    #Err : Text;
+  };
+
   public type SendMessageResult = {
     #Ok : Message;
     #Err : Text;
@@ -243,6 +248,18 @@ persistent actor canChatBackend {
     rooms.put(roomCode, room);
     incPrincipalRooms(user.principal);
     #Ok({ roomCode; room });
+  };
+
+  // returns room only if caller has already joined it
+  public query ({ caller }) func getJoinedRoom(roomCode : RoomCode) : async GetJoinedRoomResult {
+    let ?room = rooms.get(roomCode) else return #Err("Room not found");
+    if (not isRoomValid(roomCode)) {
+      return #Err("Room has expired");
+    };
+    switch (findUserByPrincipal(room.participants, caller)) {
+      case (?_) { #Ok({ room }) };
+      case null { #Err("Not joined") };
+    };
   };
 
   public shared (msg) func joinRoom(roomCode : RoomCode) : async JoinRoomResult {

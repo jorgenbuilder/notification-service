@@ -548,8 +548,10 @@ function App() {
         try {
             if (!options?.silent) setError('');
             if (!chatActorRef.current) throw new Error('Actor not ready');
-            const result = await chatActorRef.current.joinRoom(codeRaw);
-
+            let result = await chatActorRef.current.getJoinedRoom(codeRaw);
+            if ('Err' in result && result.Err === "Not joined") {
+                result = await chatActorRef.current.joinRoom(codeRaw);
+            }
             if ('Ok' in result) {
                 setRoomCode(codeRaw);
                 setRoom(result.Ok.room);

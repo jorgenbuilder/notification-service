@@ -24,6 +24,10 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : IDL.Record({ 'room' : Room, 'roomCode' : RoomCode }),
     'Err' : IDL.Text,
   });
+  const GetJoinedRoomResult = IDL.Variant({
+    'Ok' : IDL.Record({ 'room' : Room }),
+    'Err' : IDL.Text,
+  });
   const JoinRoomResult = IDL.Variant({
     'Ok' : IDL.Record({ 'room' : Room }),
     'Err' : IDL.Text,
@@ -34,6 +38,7 @@ export const idlFactory = ({ IDL }) => {
     'createRoom' : IDL.Func([], [CreateRoomResult], []),
     'endRoom' : IDL.Func([RoomCode], [IDL.Bool], []),
     'getDebugInfo' : IDL.Func([RoomCode], [IDL.Text], ['query']),
+    'getJoinedRoom' : IDL.Func([RoomCode], [GetJoinedRoomResult], ['query']),
     'getMessages' : IDL.Func([RoomCode], [IDL.Vec(Message)], ['query']),
     'getRoom' : IDL.Func([RoomCode], [IDL.Opt(Room)], ['query']),
     'joinRoom' : IDL.Func([RoomCode], [JoinRoomResult], []),
