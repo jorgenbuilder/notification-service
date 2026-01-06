@@ -125,6 +125,18 @@ async function getOrCreateIdentity(setDiag) {
     return identity;
 }
 
+function applyMessagesFlickeringGuard(prev, nextList) {
+    if (!Array.isArray(nextList)) return prev;
+    if (!Array.isArray(prev)) return nextList;
+    if (nextList.length < prev.length) return prev;
+    if (nextList.length === prev.length && prev.length > 0) {
+        const prevLastTs = Number(prev[prev.length - 1]?.timestamp || 0);
+        const nextLastTs = Number(nextList[nextList.length - 1]?.timestamp || 0);
+        if (nextLastTs < prevLastTs) return prev;
+    }
+    return nextList;
+}
+
 function App() {
     const [agent, setAgent] = useState(null);
     const [chatActor, setChatActor] = useState(null);
@@ -421,7 +433,7 @@ function App() {
                 try {
                     if (!chatActorRef.current) return;
                     const roomMessages = await chatActorRef.current.getMessages(roomCode);
-                    setMessages(roomMessages);
+                    setMessages(prev => applyMessagesFlickeringGuard(prev, roomMessages));
                 } catch (err) {
                     console.error('Error fetching messages:', err);
                 }
@@ -568,7 +580,15 @@ function App() {
             const result = await chatActorRef.current.sendMessage(roomCode, newMessage.trim());
 
             if ('Ok' in result) {
-                setMessages(prev => [...prev, result.Ok]);
+                try {
+                    const roomMessages = await chatActorRef.current.getMessages(roomCode);
+                    setMessages(prev => applyMessagesFlickeringGuard(prev, roomMessages));
+                } catch (_) {
+                    setMessages(prev => {
+                        const exists = prev?.some?.(m => m?.id === result.Ok?.id);
+                        return exists ? prev : [...prev, result.Ok];
+                    });
+                }
                 setNewMessage('');
             } else {
                 setError(result.Err);
