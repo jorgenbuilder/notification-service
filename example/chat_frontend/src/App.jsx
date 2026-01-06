@@ -7,6 +7,140 @@ import './index.scss';
 import LoadingButton from './components/LoadingButton';
 import icWebPush from 'ic-web-push';
 
+const LAST_URL_KEY = 'chat.pwa.lastUrl';
+const LAST_URL_TS_KEY = 'chat.pwa.lastUrl.ts';
+const RESTORED_FLAG = 'chat.pwa.restoredOnce';
+const SESSION_TIMEOUT_MS = 24 * 60 * 60 * 1000; // Keep in sync with backend
+
+function saveLastUrl() {
+    try {
+        const url = new URL(window.location.href);
+        if (url.origin !== window.location.origin) return;
+        localStorage.setItem(LAST_URL_KEY, url.href);
+        localStorage.setItem(LAST_URL_TS_KEY, String(Date.now()));
+    } catch (_) {
+    }
+}
+
+function readValidLastUrl() {
+    try {
+        const href = localStorage.getItem(LAST_URL_KEY);
+        if (!href) return null;
+        const tsStr = localStorage.getItem(LAST_URL_TS_KEY) || '';
+        const ts = Number(tsStr);
+        if (Number.isFinite(ts) && ts > 0) {
+            if (Date.now() - ts > SESSION_TIMEOUT_MS) {
+                try {
+                    localStorage.removeItem(LAST_URL_KEY);
+                    localStorage.removeItem(LAST_URL_TS_KEY);
+                } catch (_) {
+                }
+                return null;
+            }
+        }
+        let url = new URL(href, window.location.origin);
+        const refID = url.searchParams.get('refID') || url.searchParams.get('room') || url.searchParams.get('code');
+        if (refID && /^[A-Za-z0-9]{6}$/.test(refID)) {
+            const normalized = new URL('/' + String(refID).toUpperCase(), window.location.origin);
+            return normalized.href;
+        }
+        return url.href;
+    } catch (_) {
+        return null;
+    }
+}
+
+(function preMarkForPwaRestore() {
+    try {
+        if (typeof window === 'undefined' || typeof document === 'undefined') return;
+        const mm = (q) => window.matchMedia && window.matchMedia(q).matches;
+        const isStandalone = (mm('(display-mode: standalone)') || mm('(display-mode: minimal-ui)') || mm('(display-mode: fullscreen)')) ||
+            (typeof navigator !== 'undefined' && 'standalone' in navigator && navigator.standalone === true);
+        if (!isStandalone) return;
+        const current = new URL(window.location.href);
+        const atRoot = current.pathname === '/' && current.search === '' && current.hash === '';
+        if (!atRoot) return;
+        const lastHref = readValidLastUrl();
+        if (!lastHref) return;
+        const target = new URL(lastHref, window.location.origin);
+        if (target.origin !== window.location.origin) return;
+        if (target.href === current.href) return;
+        document.body && document.body.classList && document.body.classList.add('pwa-restoring');
+        setTimeout(() => {
+            try {
+                document.body.classList.remove('pwa-restoring');
+            } catch (_) {
+            }
+        }, 4000);
+    } catch (_) {
+    }
+})();
+
+function installLocationTracker() {
+    try {
+        const isStandalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
+            (typeof navigator !== 'undefined' && 'standalone' in navigator && navigator.standalone === true);
+        const current = new URL(window.location.href);
+        const atRoot = current.pathname === '/' && current.search === '' && current.hash === '';
+        const existing = localStorage.getItem(LAST_URL_KEY);
+        let suppressSaves = !!(isStandalone && atRoot && existing);
+        const suppressTimer = setTimeout(() => {
+            suppressSaves = false;
+        }, 2000);
+        const maybeSave = () => {
+            if (suppressSaves) return;
+            try {
+                saveLastUrl();
+            } catch (_) {
+            }
+        };
+        if (!suppressSaves) {
+            try {
+                saveLastUrl();
+            } catch (_) {
+            }
+        }
+        const onChange = () => {
+            maybeSave();
+        };
+        window.addEventListener('popstate', onChange);
+        window.addEventListener('hashchange', onChange);
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') onChange();
+        });
+        const origPush = window.history.pushState.bind(window.history);
+        const origReplace = window.history.replaceState.bind(window.history);
+        window.history.pushState = function (...args) {
+            const ret = origPush(...args);
+            maybeSave();
+            return ret;
+        };
+        window.history.replaceState = function (...args) {
+            const ret = origReplace(...args);
+            maybeSave();
+            return ret;
+        };
+        const beforeUnload = () => {
+            try {
+                const nowUrl = new URL(window.location.href);
+                const atRootNow = nowUrl.pathname === '/' && nowUrl.search === '' && nowUrl.hash === '';
+                if (!atRootNow) saveLastUrl();
+            } catch (_) {
+            }
+        };
+        window.addEventListener('beforeunload', beforeUnload);
+        return () => {
+            clearTimeout(suppressTimer);
+            window.removeEventListener('popstate', onChange);
+            window.removeEventListener('hashchange', onChange);
+            window.removeEventListener('beforeunload', beforeUnload);
+        };
+    } catch (_) {
+        return () => {
+        };
+    }
+}
+
 const ID_STORAGE_KEY_V2 = 'chat.identity.v2';
 const ID_STORAGE_SOURCE_KEY = 'chat.identity.source';
 
@@ -178,8 +312,6 @@ function App() {
     const [isNotifWorking, setIsNotifWorking] = useState(false);
     const [mobileNonPwa, setMobileNonPwa] = useState(false);
 
-    const SESSION_TIMEOUT_MS = 24 * 60 * 60 * 1000; // Keep in sync with backend
-
     // Scroll management
     const messagesContainerRef = useRef(null);
     const lastMessageIdRef = useRef(null);
@@ -236,7 +368,7 @@ function App() {
 
         if (shouldScroll) {
             requestAnimationFrame(() => {
-                messagesEndRef.current?.scrollIntoView({ behavior: sendByMeRef.current ? 'smooth' : 'auto' });
+                messagesEndRef.current?.scrollIntoView({behavior: sendByMeRef.current ? 'smooth' : 'auto'});
             });
             // reset the one-time enter flag after we acted on it
             forceScrollOnEnterRef.current = false;
@@ -253,7 +385,7 @@ function App() {
             // set the flag so the messages effect also respects it
             forceScrollOnEnterRef.current = true;
             requestAnimationFrame(() => {
-                messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+                messagesEndRef.current?.scrollIntoView({behavior: 'auto'});
             });
             // safety: clear the force flag shortly after mount to avoid late auto-scroll
             clearTimer = setTimeout(() => {
@@ -277,7 +409,7 @@ function App() {
                 forceScrollOnEnterRef.current = false;
             }
         };
-        el.addEventListener('scroll', onScroll, { passive: true });
+        el.addEventListener('scroll', onScroll, {passive: true});
         return () => {
             el.removeEventListener('scroll', onScroll);
         };
@@ -352,6 +484,52 @@ function App() {
                 setIsNotifWorking(false);
             }
         })();
+    }, []);
+
+    // Install URL tracker to remember last visited in-app URL for PWA restore
+    useEffect(() => {
+        const cleanup = installLocationTracker();
+        return () => {
+            try {
+                cleanup && cleanup();
+            } catch (_) {
+            }
+        };
+    }, []);
+
+    // Restore last URL when opening as PWA (standalone) if available
+    useEffect(() => {
+        try {
+            const isStandalone = (window.matchMedia && (window.matchMedia('(display-mode: standalone)').matches ||
+                    window.matchMedia('(display-mode: minimal-ui)').matches ||
+                    window.matchMedia('(display-mode: fullscreen)').matches)) ||
+                (typeof navigator !== 'undefined' && 'standalone' in navigator && navigator.standalone === true);
+            if (!isStandalone) return;
+            // Avoid re-restoring in same session
+            if (sessionStorage.getItem(RESTORED_FLAG) === '1') return;
+
+            const current = new URL(window.location.href);
+            const atRoot = current.pathname === '/' && current.search === '' && current.hash === '';
+            if (!atRoot) return;
+
+            const lastHref = readValidLastUrl();
+            if (!lastHref) return;
+            let target;
+            try {
+                target = new URL(lastHref, window.location.origin);
+            } catch {
+                return;
+            }
+            // Only restore for same-origin and when different from current
+            const sameOrigin = target.origin === window.location.origin;
+            const different = target.href !== current.href;
+            if (sameOrigin && different) {
+                sessionStorage.setItem(RESTORED_FLAG, '1');
+                window.location.replace(target.href);
+            }
+        } catch (_) {
+            // ignore
+        }
     }, []);
 
     // Request persistent storage (helps Safari/iOS and desktop not evict data)
@@ -736,7 +914,8 @@ function App() {
 
     useEffect(() => {
         if (currentView === 'join' && chatActorRef.current) {
-            refreshMyCodes().catch(() => {});
+            refreshMyCodes().catch(() => {
+            });
         }
     }, [currentView]);
 
@@ -758,7 +937,8 @@ function App() {
         } catch (_) {
             window.location.hash = '#';
         }
-        refreshMyCodes().catch(() => {});
+        refreshMyCodes().catch(() => {
+        });
     };
 
     const handleBackToJoin = () => {
@@ -922,7 +1102,13 @@ function App() {
                         <div style={{display: 'flex', alignItems: 'center', gap: '8px'}}>
                             <h3 style={{margin: 0}}>Previously joined</h3>
                         </div>
-                        <div className="codes-list" style={{marginTop: '8px', display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'space-between'}}>
+                        <div className="codes-list" style={{
+                            marginTop: '8px',
+                            display: 'flex',
+                            gap: '8px',
+                            flexWrap: 'wrap',
+                            justifyContent: 'space-between'
+                        }}>
                             {myCodes.map((code) => (
                                 <button
                                     key={code}
@@ -964,7 +1150,7 @@ function App() {
                             className="btn btn-link back-btn"
                             title="Back to Join"
                             aria-label="Back to Join"
-                            style={{ marginRight: '8px' }}
+                            style={{marginRight: '8px'}}
                         >
                             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                                 <path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"></path>
@@ -989,9 +1175,9 @@ function App() {
                     const m = Math.floor((total % 3600000) / 60000);
                     const s = Math.floor((total % 60000) / 1000);
                     if (h > 0) {
-                      return `${String(h)}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+                        return `${String(h)}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
                     } else {
-                      return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+                        return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
                     }
                 })())}
               </span>
