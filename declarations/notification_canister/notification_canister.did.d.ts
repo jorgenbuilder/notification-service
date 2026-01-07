@@ -24,12 +24,12 @@ export interface NotificationBody {
   'content' : string,
 }
 export interface NotificationCanister {
-  'collect' : ActorMethod<[], Array<Notification>>,
   'deregisterApplication' : ActorMethod<[Principal], undefined>,
   'getVapidPublicKey' : ActorMethod<[], string>,
   'hasSubscription' : ActorMethod<[Principal, string], boolean>,
   'http_request' : ActorMethod<[HttpRequest], HttpResponse>,
-  'isQueueEmpty' : ActorMethod<[], boolean>,
+  'peekQueue' : ActorMethod<[], Array<Notification>>,
+  'popQueue' : ActorMethod<[bigint], undefined>,
   'registerApplication' : ActorMethod<[Principal], undefined>,
   'reportBrokenSubscriptions' : ActorMethod<
     [Array<[Principal, Principal, string]>],

@@ -45,8 +45,8 @@ const idlFactory = ({ IDL }: { IDL: typeof import('@dfinity/candid').IDL }) => {
     body: NotificationBody,
   });
   return IDL.Service({
-    isQueueEmpty: IDL.Func([], [IDL.Bool], ['query']),
-    collect: IDL.Func([], [IDL.Vec(Notification)], []),
+    peekQueue: IDL.Func([], [IDL.Vec(Notification)], ['query']),
+    popQueue: IDL.Func([IDL.Nat], [], []),
     reportBrokenSubscriptions: IDL.Func(
       [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Principal, IDL.Text))],
       [],
@@ -159,21 +159,16 @@ async function runCycle(env: Env) {
       agent,
       canisterId: env.NOTIFICATION_CANISTER_ID,
     }) as unknown as {
-      isQueueEmpty: () => Promise<boolean>;
-      collect: () => Promise<any[]>;
+      peekQueue: () => Promise<CanNotification[]>;
+      popQueue: (amount: bigint) => Promise<void>;
     };
     try {
       log('Checking if queue is empty...');
-      const empty = await actor.isQueueEmpty();
-      if (!empty) {
-        log('Collecting notifications...');
-        const batch = await actor.collect();
-        log('Collected batch size:', batch.length);
-        if (batch.length === 0) {
-          log('Batch is empty after collect.');
-        } else {
-          await sendWebPushBatch(actor, batch, env);
-        }
+      const batch = await actor.peekQueue();
+      if (batch.length > 0) {
+        await sendWebPushBatch(actor, batch, env);
+        log('Reporting sent notifications...');
+        await actor.popQueue(BigInt(batch.length));
       }
     } catch (e: any) {
       err('sub-iteration error:', e?.stack || String(e));

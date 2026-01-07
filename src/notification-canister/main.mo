@@ -1,6 +1,7 @@
 import Error "mo:core/Error";
 import List "mo:core/List";
 import Map "mo:core/Map";
+import Nat "mo:core/Nat";
 import Principal "mo:core/Principal";
 import Text "mo:core/Text";
 import Queue "mo:core/Queue";
@@ -174,22 +175,24 @@ persistent actor class NotificationCanister(worker : Principal) = self {
   };
 
   // worker interface
-  public shared query ({ caller }) func isQueueEmpty() : async Bool {
-    assert caller == worker;
-    Queue.isEmpty(notificationsQueue);
-  };
-
-  public shared ({ caller }) func collect() : async [Notification] {
+  public shared query ({ caller }) func peekQueue() : async [Notification] {
     assert caller == worker;
     let ret : List.List<Notification> = List.empty();
-    label l while (List.size(ret) < 100) {
-      switch (Queue.popFront(notificationsQueue)) {
-        case (?n) List.add(ret, n);
-        case (null) break l;
+    label l for (n in Queue.values(notificationsQueue)) {
+      List.add(ret, n);
+      if (List.size(ret) == 100) {
+        break l;
       };
     };
-    sentNotifications.add(List.size(ret));
     List.toArray(ret);
+  };
+
+  public shared ({ caller }) func popQueue(amount : Nat) : async () {
+    assert caller == worker;
+    for (i in Nat.range(0, amount)) {
+      ignore Queue.popFront(notificationsQueue);
+    };
+    sentNotifications.add(amount);
   };
 
   public shared ({ caller }) func reportBrokenSubscriptions(arg : [(application : Principal, user : Principal, endpoint : Text)]) : async () {

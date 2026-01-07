@@ -1,4 +1,15 @@
 export const idlFactory = ({ IDL }) => {
+  const HttpRequest = IDL.Record({
+    'url' : IDL.Text,
+    'method' : IDL.Text,
+    'body' : IDL.Vec(IDL.Nat8),
+    'headers' : IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
+  });
+  const HttpResponse = IDL.Record({
+    'body' : IDL.Vec(IDL.Nat8),
+    'headers' : IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
+    'status_code' : IDL.Nat16,
+  });
   const Subscription = IDL.Record({
     'endpoint' : IDL.Text,
     'keys' : IDL.Record({ 'auth' : IDL.Text, 'p256dh' : IDL.Text }),
@@ -14,19 +25,7 @@ export const idlFactory = ({ IDL }) => {
     'subscription' : Subscription,
     'body' : NotificationBody,
   });
-  const HttpRequest = IDL.Record({
-    'url' : IDL.Text,
-    'method' : IDL.Text,
-    'body' : IDL.Vec(IDL.Nat8),
-    'headers' : IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
-  });
-  const HttpResponse = IDL.Record({
-    'body' : IDL.Vec(IDL.Nat8),
-    'headers' : IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
-    'status_code' : IDL.Nat16,
-  });
   const NotificationCanister = IDL.Service({
-    'collect' : IDL.Func([], [IDL.Vec(Notification)], []),
     'deregisterApplication' : IDL.Func([IDL.Principal], [], ['oneway']),
     'getVapidPublicKey' : IDL.Func([], [IDL.Text], ['query']),
     'hasSubscription' : IDL.Func(
@@ -35,7 +34,8 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'http_request' : IDL.Func([HttpRequest], [HttpResponse], ['query']),
-    'isQueueEmpty' : IDL.Func([], [IDL.Bool], ['query']),
+    'peekQueue' : IDL.Func([], [IDL.Vec(Notification)], ['query']),
+    'popQueue' : IDL.Func([IDL.Nat], [], []),
     'registerApplication' : IDL.Func([IDL.Principal], [], ['oneway']),
     'reportBrokenSubscriptions' : IDL.Func(
         [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Principal, IDL.Text))],
