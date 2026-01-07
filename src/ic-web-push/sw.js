@@ -32,32 +32,7 @@ self.addEventListener('push', (event) => {
         actions: data.actions || [],
         requireInteraction: !!data.requireInteraction,
       };
-
-      let suppress = false;
-      try {
-        const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-        const targetUrl = new URL(urlFromPayload, self.location.origin);
-        for (const client of allClients) {
-          try {
-            const clientUrl = new URL(client.url);
-            if (clientUrl.href === targetUrl.href) {
-              suppress = true;
-              break;
-            }
-          } catch {}
-        }
-      } catch {}
-
-      if (!suppress) {
-        return self.registration.showNotification(title, options);
-      }
-      try {
-        const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-        for (const client of allClients) {
-          client.postMessage({ type: 'ic-web-push:suppressed', url: urlFromPayload, title, body: options.body });
-        }
-      } catch {}
-      return;
+      return self.registration.showNotification(title, options);
     } catch (e) {
       return self.registration.showNotification('New notification', { body: 'You have a new notification', icon: '/favicon.ico' });
     }
