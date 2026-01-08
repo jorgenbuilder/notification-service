@@ -27,6 +27,7 @@ type CanNotification = {
     title: string;
     content: string;
     url: [string] | [];
+    tag: [string] | [];
   }
 }
 
@@ -38,7 +39,7 @@ const idlFactory = ({ IDL }: { IDL: typeof import('@dfinity/candid').IDL }) => {
     expirationTime: IDL.Opt(Nat),
     keys: IDL.Record({ p256dh: Text, auth: Text }),
   });
-  const NotificationBody = IDL.Record({ title: Text, content: Text, url: IDL.Opt(Text) });
+  const NotificationBody = IDL.Record({ title: Text, content: Text, url: IDL.Opt(Text), tag: IDL.Opt(Text) });
   const Notification = IDL.Record({
     context: IDL.Tuple(IDL.Principal, IDL.Principal),
     subscription: Subscription,
@@ -83,7 +84,8 @@ async function sendWebPushBatch(actor: any, notifications: CanNotification[], en
         JSON.stringify({
           title: n.body.title,
           body: n.body.content,
-          url: n.body.url.length ? n.body.url[0] : undefined
+          url: n.body.url.length ? n.body.url[0] : undefined,
+          tag: n.body.tag.length ? n.body.tag[0] : undefined,
         }),
         {
           TTL: 60 * 60, // 1 hour

@@ -6,6 +6,7 @@ module {
     title : Text;
     content : Text;
     url : ?Text;
+    tag : ?Text;
   };
 
   public type NotificationCanisterActor = actor {

@@ -34,6 +34,7 @@ persistent actor class NotificationCanister(worker : Principal) = self {
     title : Text;
     content : Text;
     url : ?Text;
+    tag : ?Text;
   };
 
   type Notification = {

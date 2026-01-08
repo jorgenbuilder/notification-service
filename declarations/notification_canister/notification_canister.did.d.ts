@@ -19,6 +19,7 @@ export interface Notification {
   'body' : NotificationBody,
 }
 export interface NotificationBody {
+  'tag' : [] | [string],
   'url' : [] | [string],
   'title' : string,
   'content' : string,

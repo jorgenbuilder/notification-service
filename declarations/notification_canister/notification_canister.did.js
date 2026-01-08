@@ -16,6 +16,7 @@ export const idlFactory = ({ IDL }) => {
     'expirationTime' : IDL.Opt(IDL.Nat),
   });
   const NotificationBody = IDL.Record({
+    'tag' : IDL.Opt(IDL.Text),
     'url' : IDL.Opt(IDL.Text),
     'title' : IDL.Text,
     'content' : IDL.Text,
