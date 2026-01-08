@@ -28,15 +28,18 @@ function handleOpenUrlFromMessage(url) {
         try {
             sessionStorage.setItem(SKIP_RESTORE_FLAG, '1');
             sessionStorage.setItem(RESTORED_FLAG, '1');
-        } catch (_) {}
+        } catch (_) {
+        }
         // Remove masking if present
         try {
             document.body?.classList?.remove('pwa-restoring');
-        } catch (_) {}
+        } catch (_) {
+        }
         // Temporarily suppress last-URL saves during the transition
         try {
             saveSuppressUntil = Date.now() + 2000;
-        } catch (_) {}
+        } catch (_) {
+        }
         // Navigate so initial URL parsing logic runs (joins by path-based room id)
         window.location.href = target.href;
     } catch (_) {
@@ -57,11 +60,18 @@ function onSwMessage(event) {
 try {
     if (typeof window !== 'undefined') {
         if (navigator?.serviceWorker) {
-            try { navigator.serviceWorker.addEventListener('message', onSwMessage); } catch (_) {}
+            try {
+                navigator.serviceWorker.addEventListener('message', onSwMessage);
+            } catch (_) {
+            }
         }
-        try { window.addEventListener('message', onSwMessage); } catch (_) {}
+        try {
+            window.addEventListener('message', onSwMessage);
+        } catch (_) {
+        }
     }
-} catch (_) {}
+} catch (_) {
+}
 
 function saveLastUrl() {
     try {
@@ -108,7 +118,10 @@ function readValidLastUrl() {
         const isStandalone = (mm('(display-mode: standalone)') || mm('(display-mode: minimal-ui)') || mm('(display-mode: fullscreen)')) ||
             (typeof navigator !== 'undefined' && 'standalone' in navigator && navigator.standalone === true);
         if (!isStandalone) return;
-        try { if (sessionStorage.getItem(SKIP_RESTORE_FLAG) === '1') return; } catch (_) {}
+        try {
+            if (sessionStorage.getItem(SKIP_RESTORE_FLAG) === '1') return;
+        } catch (_) {
+        }
         const current = new URL(window.location.href);
         const atRoot = current.pathname === '/' && current.search === '' && current.hash === '';
         if (!atRoot) return;
@@ -721,7 +734,10 @@ function App() {
 
             if (isSameRoom) {
                 // Already in this room. Avoid any joins. Optionally switch view if we truly have a joined room.
-                try { saveSuppressUntil = Date.now() + 1200; } catch (_) {}
+                try {
+                    saveSuppressUntil = Date.now() + 1200;
+                } catch (_) {
+                }
                 if (currentView !== 'room' && roomCode) {
                     // Only switch to room view if a real room is active in state
                     setCurrentView('room');
@@ -737,7 +753,8 @@ function App() {
                 // Defer until actor is ready
                 pendingJoinRef.current = candidate;
             }
-        } catch (_) {}
+        } catch (_) {
+        }
     };
 
     // On mount, reconcile path -> room and subscribe to URL/visibility changes
@@ -748,22 +765,37 @@ function App() {
             if (code) {
                 saveSuppressUntil = Date.now() + 2000;
             }
-        } catch (_) {}
+        } catch (_) {
+        }
 
         ensureRoomFromPath();
 
-        const onPop = () => { try { ensureRoomFromPath(); } catch (_) {} };
-        const onHash = () => { try { ensureRoomFromPath(); } catch (_) {} };
+        const onPop = () => {
+            try {
+                ensureRoomFromPath();
+            } catch (_) {
+            }
+        };
+        const onHash = () => {
+            try {
+                ensureRoomFromPath();
+            } catch (_) {
+            }
+        };
         let visTimer = null;
         const onVis = () => {
             try {
                 if (document.visibilityState === 'visible') {
                     if (visTimer) clearTimeout(visTimer);
                     visTimer = setTimeout(() => {
-                        try { ensureRoomFromPath(); } catch (_) {}
+                        try {
+                            ensureRoomFromPath();
+                        } catch (_) {
+                        }
                     }, 200);
                 }
-            } catch (_) {}
+            } catch (_) {
+            }
         };
 
         window.addEventListener('popstate', onPop);
@@ -821,7 +853,10 @@ function App() {
     useEffect(() => {
         const upper = (roomCode || '').toUpperCase();
         currentRoomRef.current = upper;
-        try { sessionStorage.setItem('chat.currentRoom', upper); } catch (_) {}
+        try {
+            sessionStorage.setItem('chat.currentRoom', upper);
+        } catch (_) {
+        }
     }, [roomCode]);
 
     // Poll for new messages every 2 seconds
