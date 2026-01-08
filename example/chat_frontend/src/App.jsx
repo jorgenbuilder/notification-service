@@ -44,7 +44,7 @@ function handleOpenUrlFromMessage(url) {
 }
 
 // Early listener (module-scope) to catch messages even before React mounts
-function earlySwMessageHandler(event) {
+function onSwMessage(event) {
     try {
         const data = event?.data || {};
         if (data?.type === 'OPEN_URL' && data?.url) {
@@ -57,9 +57,9 @@ function earlySwMessageHandler(event) {
 try {
     if (typeof window !== 'undefined') {
         if (navigator?.serviceWorker) {
-            try { navigator.serviceWorker.addEventListener('message', earlySwMessageHandler); } catch (_) {}
+            try { navigator.serviceWorker.addEventListener('message', onSwMessage); } catch (_) {}
         }
-        try { window.addEventListener('message', earlySwMessageHandler); } catch (_) {}
+        try { window.addEventListener('message', onSwMessage); } catch (_) {}
     }
 } catch (_) {}
 
@@ -604,17 +604,6 @@ function App() {
 
     // Listen for messages from Service Worker (e.g., OPEN_URL from notificationclick)
     useEffect(() => {
-        function onSwMessage(event) {
-            try {
-                const data = event?.data || {};
-                if (data?.type === 'OPEN_URL' && data?.url) {
-                    handleOpenUrlFromMessage(data.url);
-                }
-            } catch (_) {
-                // pass
-            }
-        }
-
         if (navigator?.serviceWorker) {
             navigator.serviceWorker.addEventListener('message', onSwMessage);
         }
