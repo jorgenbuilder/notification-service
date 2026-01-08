@@ -44,24 +44,30 @@ self.addEventListener('notificationclick', (event) => {
   const url = event.notification?.data?.url || '/';
   event.waitUntil(
     (async () => {
-      // Try to focus an existing client that matches the URL origin
+      const targetUrl = new URL(url, self.location.origin);
+      // Try to find and focus an existing same-origin client
       const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       for (const client of allClients) {
         try {
           const clientUrl = new URL(client.url);
-          const targetUrl = new URL(url, self.location.origin);
-          if (clientUrl.origin === targetUrl.origin) {
-            await client.focus();
-            // Optionally navigate it to target path
-            if ('navigate' in client && clientUrl.href !== targetUrl.href) {
-              return client.navigate(targetUrl.href);
-            }
-            return;
+          if (clientUrl.origin !== targetUrl.origin) continue;
+
+          await client.focus();
+          // Prefer messaging so the app can set session flags and handle navigation itself
+          try {
+            client.postMessage({ type: 'OPEN_URL', url: targetUrl.href });
+          } catch (_) {}
+
+          // Safe fallback: if the app is already in-app (not start_url) and different href, also navigate
+          const atRoot = clientUrl.pathname === '/' && clientUrl.search === '' && clientUrl.hash === '';
+          if ('navigate' in client && !atRoot && clientUrl.href !== targetUrl.href) {
+            return client.navigate(targetUrl.href);
           }
-        } catch {}
+          return;
+        } catch (_) {}
       }
-      // If no client, open a new window
-      return self.clients.openWindow(url);
+      // If no client exists, open a new window at the target URL
+      return self.clients.openWindow(targetUrl.href);
     })()
   );
 });

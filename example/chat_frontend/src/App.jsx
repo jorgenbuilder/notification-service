@@ -10,7 +10,58 @@ import icWebPush from 'ic-web-push';
 const LAST_URL_KEY = 'chat.pwa.lastUrl';
 const LAST_URL_TS_KEY = 'chat.pwa.lastUrl.ts';
 const RESTORED_FLAG = 'chat.pwa.restoredOnce';
+const SKIP_RESTORE_FLAG = 'chat.pwa.skipRestoreOnce';
 const SESSION_TIMEOUT_MS = 24 * 60 * 60 * 1000; // Keep in sync with backend
+
+// Temporary suppression timestamp for URL saves (e.g., during notification-driven nav)
+let saveSuppressUntil = 0;
+
+// Shared handler to process OPEN_URL messages from the Service Worker (and other sources)
+function handleOpenUrlFromMessage(url) {
+    try {
+        const target = new URL(url, window.location.origin);
+        if (target.origin !== window.location.origin) return;
+        if (window.location.href === target.href) {
+            return;
+        }
+        // Mark that this session should skip PWA restore logic
+        try {
+            sessionStorage.setItem(SKIP_RESTORE_FLAG, '1');
+            sessionStorage.setItem(RESTORED_FLAG, '1');
+        } catch (_) {}
+        // Remove masking if present
+        try {
+            document.body?.classList?.remove('pwa-restoring');
+        } catch (_) {}
+        // Temporarily suppress last-URL saves during the transition
+        try {
+            saveSuppressUntil = Date.now() + 2000;
+        } catch (_) {}
+        // Navigate so initial URL parsing logic runs (joins by path-based room id)
+        window.location.href = target.href;
+    } catch (_) {
+    }
+}
+
+// Early listener (module-scope) to catch messages even before React mounts
+function earlySwMessageHandler(event) {
+    try {
+        const data = event?.data || {};
+        if (data?.type === 'OPEN_URL' && data?.url) {
+            handleOpenUrlFromMessage(data.url);
+        }
+    } catch (_) {
+    }
+}
+
+try {
+    if (typeof window !== 'undefined') {
+        if (navigator?.serviceWorker) {
+            try { navigator.serviceWorker.addEventListener('message', earlySwMessageHandler); } catch (_) {}
+        }
+        try { window.addEventListener('message', earlySwMessageHandler); } catch (_) {}
+    }
+} catch (_) {}
 
 function saveLastUrl() {
     try {
@@ -57,6 +108,7 @@ function readValidLastUrl() {
         const isStandalone = (mm('(display-mode: standalone)') || mm('(display-mode: minimal-ui)') || mm('(display-mode: fullscreen)')) ||
             (typeof navigator !== 'undefined' && 'standalone' in navigator && navigator.standalone === true);
         if (!isStandalone) return;
+        try { if (sessionStorage.getItem(SKIP_RESTORE_FLAG) === '1') return; } catch (_) {}
         const current = new URL(window.location.href);
         const atRoot = current.pathname === '/' && current.search === '' && current.hash === '';
         if (!atRoot) return;
@@ -89,6 +141,7 @@ function installLocationTracker() {
         }, 2000);
         const maybeSave = () => {
             if (suppressSaves) return;
+            if (Date.now() < saveSuppressUntil) return;
             try {
                 saveLastUrl();
             } catch (_) {
@@ -286,6 +339,7 @@ function App() {
     const pendingJoinRef = useRef('');
     const [currentView, setCurrentView] = useState('home'); // 'home', 'room', 'join'
     const [roomCode, setRoomCode] = useState('');
+    const currentRoomRef = useRef('');
     const [joinCode, setJoinCode] = useState('');
     const [messages, setMessages] = useState([]);
     const [newMessage, setNewMessage] = useState('');
@@ -507,6 +561,8 @@ function App() {
             if (!isStandalone) return;
             // Avoid re-restoring in same session
             if (sessionStorage.getItem(RESTORED_FLAG) === '1') return;
+            // If a notification intent is present, skip restore
+            if (sessionStorage.getItem(SKIP_RESTORE_FLAG) === '1') return;
 
             const current = new URL(window.location.href);
             const atRoot = current.pathname === '/' && current.search === '' && current.hash === '';
@@ -552,17 +608,10 @@ function App() {
             try {
                 const data = event?.data || {};
                 if (data?.type === 'OPEN_URL' && data?.url) {
-                    const url = data.url;
-                    // Only handle same-origin http(s) URLs
-                    const target = new URL(url, window.location.origin);
-                    if (target.origin !== window.location.origin) return;
-                    // If we are already at target, just focus
-                    if (window.location.href === target.href) return;
-                    // Navigate the page so initial URL parsing logic runs (joins by path-based room id)
-                    window.location.href = target.href;
+                    handleOpenUrlFromMessage(data.url);
                 }
             } catch (_) {
-                // ignore
+                // pass
             }
         }
 
@@ -652,27 +701,91 @@ function App() {
         }
     }
 
-    // Check for room code in URL path on component mount and auto-join deterministically
-    // New routing: in-room view is at "/<ROOM_ID>", not "?refID=<ROOM_ID>"
-    useEffect(() => {
+    // Helper: extract a 6-char room code from current URL (path or legacy query)
+    function getRoomCodeFromLocation() {
         try {
-            const path = window.location.pathname || '/';
-            const segments = path.split('/').filter(Boolean);
+            const url = new URL(window.location.href);
+            // Prefer path segment
+            const segments = (url.pathname || '/').split('/').filter(Boolean);
             const last = segments.length > 0 ? segments[segments.length - 1] : '';
-            const candidate = String(last || '').toUpperCase();
-            const isSixAlpha = /^[A-Z0-9]{6}$/.test(candidate);
-            if (isSixAlpha) {
-                setJoinCode(candidate);
-                setCurrentView('join');
-                if (chatActorRef.current) {
-                    handleJoinRoom(candidate, {silent: true});
-                } else {
-                    // Defer until actor is ready
-                    pendingJoinRef.current = candidate;
-                }
+            let candidate = String(last || '').toUpperCase();
+            if (!/^[A-Z0-9]{6}$/.test(candidate)) {
+                // Legacy query params fallback
+                const ref = url.searchParams.get('refID') || url.searchParams.get('room') || url.searchParams.get('code') || '';
+                candidate = String(ref || '').toUpperCase();
             }
+            return /^[A-Z0-9]{6}$/.test(candidate) ? candidate : '';
         } catch (_) {
+            return '';
         }
+    }
+
+    // Ensure UI joins the room indicated by URL if different from current state (idempotent, no flicker)
+    const ensureRoomFromPath = () => {
+        try {
+            const candidate = getRoomCodeFromLocation();
+            if (!candidate) return;
+
+            // Compare strictly against current in-memory state; do not rely on session snapshot
+            const currentRoomUpper = (roomCode || '').toUpperCase();
+            const isSameRoom = !!currentRoomUpper && currentRoomUpper === candidate;
+
+            if (isSameRoom) {
+                // Already in this room. Avoid any joins. Optionally switch view if we truly have a joined room.
+                try { saveSuppressUntil = Date.now() + 1200; } catch (_) {}
+                if (currentView !== 'room' && roomCode) {
+                    // Only switch to room view if a real room is active in state
+                    setCurrentView('room');
+                }
+                return;
+            }
+
+            // Different target room from URL or we are not joined yet → perform a silent join
+            setJoinCode(candidate);
+            if (chatActorRef.current) {
+                handleJoinRoom(candidate, {silent: true});
+            } else {
+                // Defer until actor is ready
+                pendingJoinRef.current = candidate;
+            }
+        } catch (_) {}
+    };
+
+    // On mount, reconcile path -> room and subscribe to URL/visibility changes
+    useEffect(() => {
+        // If we land with a room code in the URL, suppress internal URL writes briefly
+        try {
+            const code = getRoomCodeFromLocation();
+            if (code) {
+                saveSuppressUntil = Date.now() + 2000;
+            }
+        } catch (_) {}
+
+        ensureRoomFromPath();
+
+        const onPop = () => { try { ensureRoomFromPath(); } catch (_) {} };
+        const onHash = () => { try { ensureRoomFromPath(); } catch (_) {} };
+        let visTimer = null;
+        const onVis = () => {
+            try {
+                if (document.visibilityState === 'visible') {
+                    if (visTimer) clearTimeout(visTimer);
+                    visTimer = setTimeout(() => {
+                        try { ensureRoomFromPath(); } catch (_) {}
+                    }, 200);
+                }
+            } catch (_) {}
+        };
+
+        window.addEventListener('popstate', onPop);
+        window.addEventListener('hashchange', onHash);
+        document.addEventListener('visibilitychange', onVis);
+        return () => {
+            window.removeEventListener('popstate', onPop);
+            window.removeEventListener('hashchange', onHash);
+            document.removeEventListener('visibilitychange', onVis);
+            if (visTimer) clearTimeout(visTimer);
+        };
     }, []);
 
     // When backend actor becomes ready, perform any pending auto-join
@@ -684,18 +797,21 @@ function App() {
         }
     }, [chatActor]);
 
-    // Update URL when room code changes
+    // Update URL when room code changes (only if it doesn't already match)
     useEffect(() => {
-        if (roomCode && currentView === 'room') {
-            const path = window.location.pathname || '/';
-            const segs = path.split('/').filter(Boolean);
-            if (segs.length && /^[A-Z0-9]{6}$/.test(String(segs[segs.length - 1]).toUpperCase())) {
-                segs.pop(); // remove previous roomId segment
-            }
-            const basePath = segs.length ? ('/' + segs.join('/')) : '';
-            const newUrl = `${window.location.origin}${basePath}/${roomCode}`;
-            window.history.pushState({}, '', newUrl);
+        if (!roomCode || currentView !== 'room') return;
+        // Avoid clobbering URL during external/navigation-driven transitions
+        if (Date.now() < saveSuppressUntil) return;
+        const path = window.location.pathname || '/';
+        const segs = path.split('/').filter(Boolean);
+        const last = segs.length > 0 ? String(segs[segs.length - 1]).toUpperCase() : '';
+        if (last === String(roomCode).toUpperCase()) return; // already matches target room
+        if (segs.length && /^[A-Z0-9]{6}$/.test(last)) {
+            segs.pop(); // remove previous roomId segment
         }
+        const basePath = segs.length ? ('/' + segs.join('/')) : '';
+        const newUrl = `${window.location.origin}${basePath}/${roomCode}`;
+        window.history.pushState({}, '', newUrl);
     }, [roomCode, currentView]);
 
     // Keep isCreator in sync with current room and my principal
@@ -711,6 +827,13 @@ function App() {
             setIsCreator(false);
         }
     }, [room, myPrincipal]);
+
+    // Mirror current room into a ref and sessionStorage to avoid re-joining on resume
+    useEffect(() => {
+        const upper = (roomCode || '').toUpperCase();
+        currentRoomRef.current = upper;
+        try { sessionStorage.setItem('chat.currentRoom', upper); } catch (_) {}
+    }, [roomCode]);
 
     // Poll for new messages every 2 seconds
     useEffect(() => {
