@@ -45,7 +45,7 @@ self.addEventListener('push', (event) => {
         }
     })());
 });
-.
+
 self.addEventListener('message', (event) => {
     try {
         const data = event?.data || {};
