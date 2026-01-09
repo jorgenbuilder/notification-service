@@ -81,6 +81,9 @@ persistent actor class NotificationCanister(worker : Principal) = self {
   };
 
   public shared ({ caller }) func subscribe(application : Principal, subscription : Subscription) {
+    if (Principal.isAnonymous(caller)) {
+      throw Error.reject("Anonymous users cannot subscribe to notifications");
+    };
     let ?app = Map.get(applications, Principal.compare, application) else throw Error.reject("Application not found");
     switch (Map.get(app.subscriptions, Principal.compare, caller)) {
       case (?list) {

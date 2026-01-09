@@ -116,13 +116,72 @@ await icWebPush.deregisterApplication();
 
 ## Service worker behavior
 
-The service worker listens to:
+This SDK ships a dedicated service worker (`sw.js`) intended to live under its own scope (recommended: `/ic-web-push/`) and be served from your web root as `/ic-web-push-sw.js`. It is designed to coexist with your app’s main service worker without conflict. The worker implements the following:
 
-- `install`/`activate` — makes itself active immediately.
-- `push` — expects a JSON payload `{ title, content, url }`. Falls back to a generic message if payload is text.
-- `notificationclick` — focuses an existing tab for your origin if possible, otherwise opens a new window to `url`.
+- `install`
+  - Calls `self.skipWaiting()` so that updates to the worker take effect immediately after install.
+- `activate`
+  - Calls `self.clients.claim()` to take control of pages under its scope without a manual reload.
+- `push`
+  - Parses a JSON payload (if present). Robust to missing/invalid payloads and falls back to a generic notification.
+  - Supported payload fields (top-level or under `data`):
+    - `title` (string): Notification title. Default: `"New notification"`.
+    - `body` (string): Notification body. Default: `"You have a new message"`.
+    - `url` (string): A URL to open/focus when the notification is clicked. May also be provided as `data.url`.
+    - `actions` (array): Standard Notification API actions.
+    - `requireInteraction` (boolean): If `true`, the notification stays until user interaction.
+    - `tag` (string): Notification tag for collapsing/updating and for later clearing.
+    - `data` (object): Arbitrary extra fields; merged into the notification `data` object. The worker ensures `data.url` is set to the resolved URL.
+  - Display options applied by default:
+    - `icon` and `badge` default to `/favicon.ico` (override by editing `sw.js`).
+    - If `tag` is provided, it is set on the notification so later notifications with the same tag replace or group, per browser behavior.
+  - Example payload sent by your backend/canister:
+    ```json
+    {
+      "title": "New message",
+      "body": "You received a message",
+      "data": { "url": "/inbox/123", "tag": "chat-123" },
+      "actions": [{ "action": "open", "title": "Open" }],
+      "requireInteraction": true
+    }
+    ```
+- `message`
+  - Listens for `{ type: 'CLEAR_NOTIFICATIONS_BY_TAG', tag: string }` to programmatically close notifications with the given tag.
+  - Uses `registration.getNotifications({ includeTriggered: true })` when supported, with a safe fallback to `getNotifications()`.
+  - Example from a page context (any controlled client under the SW scope):
+    ```ts
+    navigator.serviceWorker.controller?.postMessage({
+      type: 'CLEAR_NOTIFICATIONS_BY_TAG',
+      tag: 'chat-123',
+    });
+    ```
+- `notificationclick`
+  - Closes the clicked notification.
+  - Resolves a target URL from `notification.data.url` (defaults to `/`).
+  - Looks for an existing same-origin window client and, if found:
+    - Focuses it.
+    - Tries to `postMessage({ type: 'OPEN_URL', url })` so the app can handle in-app routing/session flags.
+    - As a safe fallback, if the client is not at the origin root and the href differs, calls `client.navigate(url)`.
+  - If no suitable client exists, opens a new window via `clients.openWindow(url)`.
 
-You can customize the UI, icons, or behavior by editing `sw.js` before copying it into your `public` root.
+You can customize icons, default texts, or add behavior by editing `src/ic-web-push/sw.js` before copying it into your build’s web root as `ic-web-push-sw.js`.
+
+### Page <-> SW messaging: handling OPEN_URL
+
+When a notification is clicked, the SW first tries to notify an existing tab using a message. In your application code, you may listen to this message to perform client-side routing instead of a hard navigation:
+
+```ts
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    const msg = event.data;
+    if (msg?.type === 'OPEN_URL' && typeof msg.url === 'string') {
+      // App-specific navigation, e.g., using your router
+      // router.push(new URL(msg.url, location.origin).pathname);
+      // Or simply: location.href = msg.url;
+    }
+  });
+}
+```
 
 ## Integration example (Vite + the provided chat_frontend)
 
