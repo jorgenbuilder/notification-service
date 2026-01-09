@@ -45,6 +45,35 @@ self.addEventListener('push', (event) => {
         }
     })());
 });
+.
+self.addEventListener('message', (event) => {
+    try {
+        const data = event?.data || {};
+        if (data && data.type === 'CLEAR_NOTIFICATIONS_BY_TAG') {
+            const tag = data.tag;
+            if (!tag) return;
+            event.waitUntil((async () => {
+                try {
+                    const list = await self.registration.getNotifications({ includeTriggered: true });
+                    for (const n of list) {
+                        if (n?.tag === tag) {
+                            try { n.close(); } catch (_) {}
+                        }
+                    }
+                } catch (_) {
+                    try {
+                        const list = await self.registration.getNotifications();
+                        for (const n of list) {
+                            if (n?.tag === tag) {
+                                try { n.close(); } catch (_) {}
+                            }
+                        }
+                    } catch (_) {}
+                }
+            })());
+        }
+    } catch (_) {}
+});
 
 self.addEventListener('notificationclick', (event) => {
     event.notification.close();

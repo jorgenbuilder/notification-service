@@ -391,6 +391,25 @@ function App() {
     const prevLenRef = useRef(0);
     // Track whether the user is at/near the bottom; helps decide auto-scroll on new messages
     const stuckToBottomRef = useRef(true);
+    // Track last known near-bottom state to detect transitions
+    const lastNearBottomRef = useRef(true);
+
+    const clearNotificationsByTag = async (tag) => {
+        try {
+            if (!tag) return;
+            if (navigator?.serviceWorker) {
+                try {
+                    const regs = await navigator.serviceWorker.getRegistrations();
+                    regs?.forEach(reg => {
+                        try { reg?.active?.postMessage({ type: 'CLEAR_NOTIFICATIONS_BY_TAG', tag }); } catch (_) {}
+                    });
+                } catch (_) {}
+                try {
+                    navigator.serviceWorker.controller?.postMessage({ type: 'CLEAR_NOTIFICATIONS_BY_TAG', tag });
+                } catch (_) {}
+            }
+        } catch (_) {}
+    };
 
     const isNearBottom = (el, threshold = 160) => {
         if (!el) return true;
@@ -436,6 +455,11 @@ function App() {
         if (shouldScroll) {
             requestAnimationFrame(() => {
                 messagesEndRef.current?.scrollIntoView({behavior: sendByMeRef.current ? 'smooth' : 'auto'});
+                try {
+                    if (currentView === 'room' && currentRoomRef.current) {
+                        clearNotificationsByTag(currentRoomRef.current).then();
+                    }
+                } catch (_) {}
             });
             // reset the one-time enter flag after we acted on it
             forceScrollOnEnterRef.current = false;
@@ -453,6 +477,11 @@ function App() {
             forceScrollOnEnterRef.current = true;
             requestAnimationFrame(() => {
                 messagesEndRef.current?.scrollIntoView({behavior: 'auto'});
+                try {
+                    if (currentRoomRef.current) {
+                        clearNotificationsByTag(currentRoomRef.current).then();
+                    }
+                } catch (_) {}
             });
             // safety: clear the force flag shortly after mount to avoid late auto-scroll
             clearTimer = setTimeout(() => {
@@ -471,9 +500,18 @@ function App() {
         if (!el) return;
         const onScroll = () => {
             userInteractedRef.current = true;
-            if (!isNearBottom(el, 80)) {
+            const near = isNearBottom(el, 80);
+            const wasNear = !!lastNearBottomRef.current;
+            lastNearBottomRef.current = near;
+            if (!near) {
                 // as soon as the user scrolls away from bottom, cancel any pending forced scroll
                 forceScrollOnEnterRef.current = false;
+            } else if (!wasNear && near) {
+                try {
+                    if (currentView === 'room' && currentRoomRef.current) {
+                        clearNotificationsByTag(currentRoomRef.current).then();
+                    }
+                } catch (_) {}
             }
         };
         el.addEventListener('scroll', onScroll, {passive: true});
@@ -897,6 +935,43 @@ function App() {
 
             return () => clearInterval(interval);
         }
+    }, [currentView, roomCode]);
+
+    // periodically clear notifications for the current chat, to handle delayed push arrivals
+    useEffect(() => {
+        if (currentView !== 'room' || !roomCode) return;
+        let intervalId = null;
+        const run = () => {
+            try {
+                if (document.visibilityState !== 'visible') return;
+                const tag = currentRoomRef.current;
+                if (tag) {
+                    clearNotificationsByTag(tag).then();
+                }
+            } catch (_) {}
+        };
+        const setup = () => {
+            try {
+                if (document.visibilityState === 'visible') {
+                    run();
+                    if (!intervalId) {
+                        intervalId = setInterval(run, 5000);
+                    }
+                } else {
+                    if (intervalId) {
+                        clearInterval(intervalId);
+                        intervalId = null;
+                    }
+                }
+            } catch (_) {}
+        };
+        setup();
+        const onVis = () => setup();
+        document.addEventListener('visibilitychange', onVis);
+        return () => {
+            if (intervalId) clearInterval(intervalId);
+            document.removeEventListener('visibilitychange', onVis);
+        };
     }, [currentView, roomCode]);
 
     // Compute countdown every second from room.lastActivity
