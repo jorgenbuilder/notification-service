@@ -6,10 +6,6 @@ import Principal "mo:core/Principal";
 import Text "mo:core/Text";
 import Queue "mo:core/Queue";
 
-import PT "mo:promtracker";
-
-import HTTP "./http";
-
 persistent actor class NotificationCanister(worker : Principal) = self {
 
   transient let CONST = {
@@ -46,30 +42,6 @@ persistent actor class NotificationCanister(worker : Principal) = self {
   let applications : Map.Map<Principal, Application> = Map.empty();
   let notificationsQueue : Queue.Queue<Notification> = Queue.empty();
 
-  var ptData : PT.StableData = null;
-  transient let pt = PT.PromTracker("", 65);
-
-  ignore pt.addPullValue("applications_count", "", func() = Map.size(applications));
-  transient let subscriptionsCount = pt.addCounter("subscriptions_count", "", true);
-  transient let totalMessages = pt.addCounter("total_messages", "", true);
-  transient let totalNotifications = pt.addCounter("total_notifications", "", true);
-  transient let sentNotifications = pt.addCounter("sent_notifications", "", true);
-  ignore pt.addPullValue("notifications_in_queue", "", func() = Queue.size(notificationsQueue));
-
-  pt.unshare(ptData);
-
-  system func preupgrade() {
-    ptData := pt.share();
-  };
-
-  public query func http_request(req : HTTP.HttpRequest) : async HTTP.HttpResponse {
-    let ?path = Text.split(req.url, #char '?').next() else return HTTP.render400();
-    switch (req.method, path) {
-      case ("GET", "/metrics") pt.renderExposition("canister=\"" # PT.shortName(self) # "\"") |> HTTP.renderPlainText(_);
-      case (_) HTTP.render400();
-    };
-  };
-
   // end user interface
   public query func getVapidPublicKey() : async Text = async CONST.vapidPublicKey;
 
@@ -89,17 +61,10 @@ persistent actor class NotificationCanister(worker : Principal) = self {
       case (?list) {
         switch (List.findIndex<Subscription>(list, func(item) = item.endpoint == subscription.endpoint)) {
           case (?idx) List.put<Subscription>(list, idx, subscription);
-          case (null) {
-            List.add(list, subscription);
-            subscriptionsCount.add(1);
-          };
+          case (null) List.add(list, subscription);
         };
       };
-      case (null) {
-        let l = List.fromArray<Subscription>([subscription]);
-        Map.add(app.subscriptions, Principal.compare, caller, l);
-        subscriptionsCount.add(1);
-      };
+      case (null) Map.add(app.subscriptions, Principal.compare, caller, List.fromArray<Subscription>([subscription]));
     };
   };
 
@@ -112,7 +77,6 @@ persistent actor class NotificationCanister(worker : Principal) = self {
         } else {
           Map.add(app.subscriptions, Principal.compare, user, listUpd);
         };
-        subscriptionsCount.sub(List.size(list) - List.size(listUpd));
       };
       case (null) {};
     };
@@ -125,16 +89,7 @@ persistent actor class NotificationCanister(worker : Principal) = self {
 
   public shared ({ caller }) func unsubscribeAll(application : Principal) {
     let ?app = Map.get(applications, Principal.compare, application) else throw Error.reject("Application not found");
-    switch (Map.get(app.subscriptions, Principal.compare, caller)) {
-      case (?list) {
-        Map.remove(app.subscriptions, Principal.compare, caller);
-        let count = List.size(list);
-        if (count > 0) {
-          subscriptionsCount.sub(count);
-        };
-      };
-      case (null) {};
-    };
+    Map.remove(app.subscriptions, Principal.compare, caller);
   };
 
   // admin interface
@@ -156,25 +111,17 @@ persistent actor class NotificationCanister(worker : Principal) = self {
     if (not Principal.isController(caller)) {
       throw Error.reject("Only controllers can register application");
     };
-    let ?app = Map.get(applications, Principal.compare, manager) else return;
-    var subscriptionsAmount = 0;
-    for (subList in Map.values(app.subscriptions)) {
-      subscriptionsAmount += List.size(subList);
-    };
-    subscriptionsCount.sub(subscriptionsAmount);
     Map.remove(applications, Principal.compare, manager);
   };
 
   // app owner interface
   public shared ({ caller }) func sendNotifications(arg : [(user : Principal, body : NotificationBody)]) : async () {
     let ?app = Map.get(applications, Principal.compare, caller) else throw Error.reject("Caller does not have any application registered");
-    totalMessages.add(arg.size());
     for ((user, body) in arg.values()) {
       let ?userSubscriptions = Map.get(app.subscriptions, Principal.compare, user) else return;
       for (subscription in List.values(userSubscriptions)) {
         Queue.pushBack(notificationsQueue, { subscription; body; context = (caller, user) });
       };
-      totalNotifications.add(List.size(userSubscriptions));
     };
   };
 
@@ -196,7 +143,6 @@ persistent actor class NotificationCanister(worker : Principal) = self {
     for (i in Nat.range(0, amount)) {
       ignore Queue.popFront(notificationsQueue);
     };
-    sentNotifications.add(amount);
   };
 
   public shared ({ caller }) func reportBrokenSubscriptions(arg : [(application : Principal, user : Principal, endpoint : Text)]) : async () {
