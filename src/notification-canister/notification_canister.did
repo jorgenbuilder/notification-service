@@ -1,0 +1,54 @@
+type SubscriptionKeys = record {
+  p256dh: text;
+  auth: text;
+};
+
+type Subscription = record {
+  endpoint: text;
+  expirationTime: opt nat;
+  keys: SubscriptionKeys;
+};
+
+type NotificationBody = record {
+  title: text;
+  content: text;
+  url: opt text;
+  tag: opt text;
+};
+
+type Notification = record {
+  subscription: Subscription;
+  body: NotificationBody;
+  context: record {
+    application: principal;
+    receiver: principal;
+  };
+};
+
+service : (principal) -> {
+  // end-user interface
+  getVapidPublicKey: () -> (text) query;
+  hasSubscription: (principal, text) -> (bool) query;
+  subscribe: (principal, Subscription) -> ();
+  unsubscribe: (principal, text) -> ();
+  unsubscribeAll: (principal) -> ();
+
+  // admin interface
+  registerApplication: (principal) -> ();
+  deregisterApplication: (principal) -> ();
+
+  // app owner interface
+  sendNotifications: (vec record {
+    0: principal;
+    1: NotificationBody;
+  }) -> ();
+
+  // worker interface
+  peekQueue: () -> (vec Notification) query;
+  popQueue: (nat64) -> ();
+  reportBrokenSubscriptions: (vec record {
+    application: principal;
+    user: principal;
+    endpoint: text;
+  }) -> ();
+}

@@ -47,7 +47,7 @@ const idlFactory = ({ IDL }: { IDL: typeof import('@dfinity/candid').IDL }) => {
   });
   return IDL.Service({
     peekQueue: IDL.Func([], [IDL.Vec(Notification)], ['query']),
-    popQueue: IDL.Func([IDL.Nat], [], []),
+    popQueue: IDL.Func([IDL.Nat64], [], []),
     reportBrokenSubscriptions: IDL.Func(
       [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Principal, IDL.Text))],
       [],

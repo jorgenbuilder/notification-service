@@ -1,0 +1,5 @@
+[workspace]
+members = [
+  "src/notification-canister"
+]
+resolver = "2"

@@ -1,18 +1,11 @@
 export const idlFactory = ({ IDL }) => {
-  const HttpRequest = IDL.Record({
-    'url' : IDL.Text,
-    'method' : IDL.Text,
-    'body' : IDL.Vec(IDL.Nat8),
-    'headers' : IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
-  });
-  const HttpResponse = IDL.Record({
-    'body' : IDL.Vec(IDL.Nat8),
-    'headers' : IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
-    'status_code' : IDL.Nat16,
+  const SubscriptionKeys = IDL.Record({
+    'auth' : IDL.Text,
+    'p256dh' : IDL.Text,
   });
   const Subscription = IDL.Record({
     'endpoint' : IDL.Text,
-    'keys' : IDL.Record({ 'auth' : IDL.Text, 'p256dh' : IDL.Text }),
+    'keys' : SubscriptionKeys,
     'expirationTime' : IDL.Opt(IDL.Nat),
   });
   const NotificationBody = IDL.Record({
@@ -22,24 +15,34 @@ export const idlFactory = ({ IDL }) => {
     'content' : IDL.Text,
   });
   const Notification = IDL.Record({
-    'context' : IDL.Tuple(IDL.Principal, IDL.Principal),
+    'context' : IDL.Record({
+      'application' : IDL.Principal,
+      'receiver' : IDL.Principal,
+    }),
     'subscription' : Subscription,
     'body' : NotificationBody,
   });
-  const NotificationCanister = IDL.Service({
-    'deregisterApplication' : IDL.Func([IDL.Principal], [], ['oneway']),
+  return IDL.Service({
+    'deregisterApplication' : IDL.Func([IDL.Principal], [], []),
     'getVapidPublicKey' : IDL.Func([], [IDL.Text], ['query']),
     'hasSubscription' : IDL.Func(
         [IDL.Principal, IDL.Text],
         [IDL.Bool],
         ['query'],
       ),
-    'http_request' : IDL.Func([HttpRequest], [HttpResponse], ['query']),
     'peekQueue' : IDL.Func([], [IDL.Vec(Notification)], ['query']),
-    'popQueue' : IDL.Func([IDL.Nat], [], []),
-    'registerApplication' : IDL.Func([IDL.Principal], [], ['oneway']),
+    'popQueue' : IDL.Func([IDL.Nat64], [], []),
+    'registerApplication' : IDL.Func([IDL.Principal], [], []),
     'reportBrokenSubscriptions' : IDL.Func(
-        [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Principal, IDL.Text))],
+        [
+          IDL.Vec(
+            IDL.Record({
+              'application' : IDL.Principal,
+              'endpoint' : IDL.Text,
+              'user' : IDL.Principal,
+            })
+          ),
+        ],
         [],
         [],
       ),
@@ -48,10 +51,9 @@ export const idlFactory = ({ IDL }) => {
         [],
         [],
       ),
-    'subscribe' : IDL.Func([IDL.Principal, Subscription], [], ['oneway']),
-    'unsubscribe' : IDL.Func([IDL.Principal, IDL.Text], [], ['oneway']),
-    'unsubscribeAll' : IDL.Func([IDL.Principal], [], ['oneway']),
+    'subscribe' : IDL.Func([IDL.Principal, Subscription], [], []),
+    'unsubscribe' : IDL.Func([IDL.Principal, IDL.Text], [], []),
+    'unsubscribeAll' : IDL.Func([IDL.Principal], [], []),
   });
-  return NotificationCanister;
 };
 export const init = ({ IDL }) => { return [IDL.Principal]; };

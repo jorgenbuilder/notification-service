@@ -2,19 +2,8 @@ import type { Principal } from '@dfinity/principal';
 import type { ActorMethod } from '@dfinity/agent';
 import type { IDL } from '@dfinity/candid';
 
-export interface HttpRequest {
-  'url' : string,
-  'method' : string,
-  'body' : Uint8Array | number[],
-  'headers' : Array<[string, string]>,
-}
-export interface HttpResponse {
-  'body' : Uint8Array | number[],
-  'headers' : Array<[string, string]>,
-  'status_code' : number,
-}
 export interface Notification {
-  'context' : [Principal, Principal],
+  'context' : { 'application' : Principal, 'receiver' : Principal },
   'subscription' : Subscription,
   'body' : NotificationBody,
 }
@@ -24,18 +13,39 @@ export interface NotificationBody {
   'title' : string,
   'content' : string,
 }
-export interface NotificationCanister {
+export interface Subscription {
+  'endpoint' : string,
+  'keys' : SubscriptionKeys,
+  'expirationTime' : [] | [bigint],
+}
+export interface SubscriptionKeys { 'auth' : string, 'p256dh' : string }
+export interface _SERVICE {
   'deregisterApplication' : ActorMethod<[Principal], undefined>,
+  /**
+   * end-user interface
+   */
   'getVapidPublicKey' : ActorMethod<[], string>,
   'hasSubscription' : ActorMethod<[Principal, string], boolean>,
-  'http_request' : ActorMethod<[HttpRequest], HttpResponse>,
+  /**
+   * worker interface
+   */
   'peekQueue' : ActorMethod<[], Array<Notification>>,
   'popQueue' : ActorMethod<[bigint], undefined>,
+  /**
+   * admin interface
+   */
   'registerApplication' : ActorMethod<[Principal], undefined>,
   'reportBrokenSubscriptions' : ActorMethod<
-    [Array<[Principal, Principal, string]>],
+    [
+      Array<
+        { 'application' : Principal, 'endpoint' : string, 'user' : Principal }
+      >,
+    ],
     undefined
   >,
+  /**
+   * app owner interface
+   */
   'sendNotifications' : ActorMethod<
     [Array<[Principal, NotificationBody]>],
     undefined
@@ -44,11 +54,5 @@ export interface NotificationCanister {
   'unsubscribe' : ActorMethod<[Principal, string], undefined>,
   'unsubscribeAll' : ActorMethod<[Principal], undefined>,
 }
-export interface Subscription {
-  'endpoint' : string,
-  'keys' : { 'auth' : string, 'p256dh' : string },
-  'expirationTime' : [] | [bigint],
-}
-export interface _SERVICE extends NotificationCanister {}
 export declare const idlFactory: IDL.InterfaceFactory;
 export declare const init: (args: { IDL: typeof IDL }) => IDL.Type[];
