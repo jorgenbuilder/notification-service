@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { Actor, HttpAgent } from '@dfinity/agent';
 import { Ed25519KeyIdentity } from '@dfinity/identity';
 import { Principal } from '@dfinity/principal';
-import { sendNotification } from 'web-push';
+import { encryptPayload, sendEncrypted } from './web-push-helper';
 
 export interface Env {
   IC_HOST: string;
@@ -72,7 +72,7 @@ async function sendWebPushBatch(actor: any, notifications: CanNotification[], en
   const tasks = notifications.map(async (n, i) => {
     let result;
     try {
-      result = await sendNotification(
+      const payload = encryptPayload(
         {
           endpoint: n.subscription.endpoint,
           expirationTime: n.subscription.expirationTime.length ? n.subscription.expirationTime[0] : null,
@@ -86,7 +86,10 @@ async function sendWebPushBatch(actor: any, notifications: CanNotification[], en
           body: n.body.content,
           url: n.body.url.length ? n.body.url[0] : undefined,
           tag: n.body.tag.length ? n.body.tag[0] : undefined,
-        }),
+        })
+      )
+      result = await sendEncrypted(
+        payload,
         {
           TTL: 60 * 60, // 1 hour
           vapidDetails: {
