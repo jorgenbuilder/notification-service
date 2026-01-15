@@ -64,40 +64,6 @@ export function encryptPayload(subscription: PushSubscription, payload?: string 
 // basically original "sendNotification" function from web-push library with patched signature
 export async function sendEncrypted(payload: EncryptedPayload, options?: RequestOptions): Promise<SendResult> {
   let requestDetails = await generateRequestDetails(payload, options);
-  try {
-    const headers = requestDetails.headers || {} as any;
-    const contentEncoding = headers['Content-Encoding'] || headers['content-encoding'];
-    const encryption = headers['Encryption'] || headers['encryption'];
-    const cryptoKey = headers['Crypto-Key'] || headers['crypto-key'];
-    const bodyBuf: Buffer | null = requestDetails.body && typeof requestDetails.body !== 'string' ? (requestDetails.body as Buffer) : null;
-    const bodyLen = bodyBuf ? bodyBuf.length : (requestDetails.body ? Buffer.byteLength(requestDetails.body as any as string) : 0);
-    const bodyPreview = bodyBuf ? bodyBuf.subarray(0, 64).toString('base64url') : '';
-    console.log('[DEBUG_LOG][sendEncrypted] endpoint=', requestDetails.endpoint,
-      ' content-encoding=', contentEncoding,
-      ' encryption=', encryption,
-      ' crypto-key=', cryptoKey,
-      ' bodyLen=', bodyLen,
-      ' body16b64=', bodyPreview);
-
-    // Extra validation for aes128gcm: parse body layout and compare with headers
-    if (contentEncoding === 'aes128gcm' && bodyBuf && typeof encryption === 'string' && typeof cryptoKey === 'string') {
-      const encSaltMatch = /salt=([^;\s]+)/i.exec(encryption);
-      const hdrSaltB64 = encSaltMatch ? encSaltMatch[1] : '';
-      const ckDhMatch = /(?:^|;\s*)dh=([^;\s]+)/i.exec(cryptoKey);
-      const hdrDhB64 = ckDhMatch ? ckDhMatch[1] : '';
-      const salt = bodyBuf.subarray(0, 16);
-      const rs = bodyBuf.readUInt32BE(16);
-      const keyIdLen = bodyBuf.readUInt8(20);
-      const dh = bodyBuf.subarray(21, 86); // 65 bytes
-      const cipherFirst = bodyBuf.subarray(86, Math.min(86 + 16, bodyBuf.length)).toString('base64url');
-      const saltMatches = hdrSaltB64 && (salt.toString('base64url') === hdrSaltB64);
-      const dhMatches = hdrDhB64 && (dh.toString('base64url') === hdrDhB64);
-      console.log('[DEBUG_LOG][sendEncrypted][validate] rs=', rs, 'keyIdLen=', keyIdLen,
-        'saltMatches=', !!saltMatches, 'dhMatches=', !!dhMatches, 'cipher16b64=', cipherFirst);
-    }
-  } catch (e) {
-    console.warn('[DEBUG_LOG][sendEncrypted] failed to log request details:', e);
-  }
   return new Promise(function (resolve, reject) {
     const httpsOptions: https.RequestOptions = {};
     const urlParts = url.parse(requestDetails.endpoint);

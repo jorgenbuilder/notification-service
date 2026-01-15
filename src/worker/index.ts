@@ -56,20 +56,9 @@ const idlFactory = ({ IDL }: { IDL: typeof import('@dfinity/candid').IDL }) => {
     contentEncoding: ContentEncoding,
     encrypted: IDL.Opt(EncryptedData),
   });
-  const DebugEncryptedItem = IDL.Record({
-    endpoint: Text,
-    salt: IDL.Vec(IDL.Nat8),
-    localPublicKey: IDL.Vec(IDL.Nat8),
-    ephemeralPrivateKey: IDL.Vec(IDL.Nat8),
-    context: IDL.Vec(IDL.Nat8),
-    cek: IDL.Vec(IDL.Nat8),
-    nonce: IDL.Vec(IDL.Nat8),
-    cipherText: IDL.Vec(IDL.Nat8),
-  });
   return IDL.Service({
     peekQueue: IDL.Func([], [IDL.Vec(Notification)], ['query']),
     peekQueueEncrypted: IDL.Func([], [IDL.Vec(EncryptedNotification)], ['query']),
-    peekQueueEncryptedDebug: IDL.Func([], [IDL.Vec(DebugEncryptedItem)], ['query']),
     popQueue: IDL.Func([IDL.Nat64], [], []),
     reportBrokenSubscriptions: IDL.Func(
       [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Principal, IDL.Text))],
@@ -128,7 +117,7 @@ async function sendWebPushBatch(actor: any, encryptedItems: EncryptedNotificatio
 
     if (FORCE_LOCAL || !encItem.encrypted || encItem.encrypted.length === 0) {
       if (FORCE_LOCAL) {
-        warn('[DEBUG_LOG][batch] FORCE_LOCAL_ENCRYPTION=1 active — using local encryption for index', i);
+        warn('Using local encryption for index', i);
       } else {
         warn('Encrypted payload missing for item index', i, '- falling back to local encryption.');
       }
@@ -145,12 +134,6 @@ async function sendWebPushBatch(actor: any, encryptedItems: EncryptedNotificatio
       const rs = Buffer.alloc(4); rs.writeUInt32BE(4096, 0);
       const keyIdLen = Buffer.from([65]);
       const ct = ce === 'aes128gcm' ? Buffer.concat([saltBytes, rs, keyIdLen, lp, ctRaw]) : ctRaw;
-      log('[DEBUG_LOG][batch] using canister encryption for index', i,
-          'ce=', ce,
-          'lp.len=', lp.length,
-          'salt.len=', saltBytes.length,
-          'salt.b64.first12=', saltB64.slice(0, 12),
-          'ct.len=', ct.length);
       payload = {
         endpoint: encItem.endpoint,
         contentEncoding: ce,
@@ -250,7 +233,7 @@ async function runCycle(env: Env) {
       if (n > 0) {
         await sendWebPushBatch(actor, encryptedBatch.slice(0, n), contexts.slice(0, n), env);
         log('Reporting sent notifications...');
-        // await actor.popQueue(BigInt(n));
+        await actor.popQueue(BigInt(n));
       }
     } catch (e: any) {
       err('sub-iteration error:', e?.stack || String(e));

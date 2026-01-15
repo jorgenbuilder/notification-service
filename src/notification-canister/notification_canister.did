@@ -37,17 +37,6 @@ type EncryptedNotification = record {
 
 type ContentEncoding = variant { aesgcm; aes128gcm; };
 
-type DebugEncryptedItem = record {
-  endpoint: text;
-  salt: vec nat8;
-  localPublicKey: vec nat8;
-  ephemeralPrivateKey: vec nat8;
-  context: vec nat8;
-  cek: vec nat8;
-  nonce: vec nat8;
-  plaintextHead: vec nat8;
-  cipherText: vec nat8;
-};
 
 service : (principal) -> {
   // end-user interface
