@@ -13,29 +13,30 @@ export interface Env {
   VAPID_PRIVATE_KEY: string;
 }
 
+type CanNotification = {
+  endpoint: string;
+  contentEncoding: { aesgcm?: null; aes128gcm?: null };
+  encrypted: [{
+    localPublicKey: Uint8Array | number[];
+    salt: Uint8Array | number[];
+    cipherText: Uint8Array | number[]
+  }] | [];
+  context: [Principal, Principal];
+}
+
 const idlFactory = ({ IDL }: { IDL: typeof import('@dfinity/candid').IDL }) => {
-  const Text = IDL.Text;
-  const Nat = IDL.Nat;
-  const Subscription = IDL.Record({
-    endpoint: Text,
-    expirationTime: IDL.Opt(Nat),
-    keys: IDL.Record({ p256dh: Text, auth: Text }),
-  });
-  const NotificationBody = IDL.Record({ title: Text, content: Text, url: IDL.Opt(Text), tag: IDL.Opt(Text) });
-  const ContentEncoding = IDL.Variant({ aesgcm: IDL.Null, aes128gcm: IDL.Null });
-  const EncryptedData = IDL.Record({
-    localPublicKey: IDL.Vec(IDL.Nat8),
-    salt: IDL.Vec(IDL.Nat8),
-    cipherText: IDL.Vec(IDL.Nat8),
-  });
-  const EncryptedNotification = IDL.Record({
-    endpoint: Text,
-    contentEncoding: ContentEncoding,
-    encrypted: IDL.Opt(EncryptedData),
+  const Notification = IDL.Record({
+    endpoint: IDL.Text,
+    contentEncoding: IDL.Variant({ aesgcm: IDL.Null, aes128gcm: IDL.Null }),
+    encrypted: IDL.Opt(IDL.Record({
+      localPublicKey: IDL.Vec(IDL.Nat8),
+      salt: IDL.Vec(IDL.Nat8),
+      cipherText: IDL.Vec(IDL.Nat8),
+    })),
     context: IDL.Tuple(IDL.Principal, IDL.Principal),
   });
   return IDL.Service({
-    peekQueue: IDL.Func([], [IDL.Vec(EncryptedNotification)], ['query']),
+    peekQueue: IDL.Func([], [IDL.Vec(Notification)], ['query']),
     popQueue: IDL.Func([IDL.Nat64], [], []),
     reportBrokenSubscriptions: IDL.Func(
       [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Principal, IDL.Text))],
@@ -56,17 +57,6 @@ function identityFromBase64Secret(b64: string): Ed25519KeyIdentity {
   return Ed25519KeyIdentity.fromSecretKey(raw);
 }
 
-type EncryptedNotification = {
-  endpoint: string;
-  contentEncoding: { aesgcm?: null; aes128gcm?: null };
-  encrypted: [{
-    localPublicKey: Uint8Array | number[];
-    salt: Uint8Array | number[];
-    cipherText: Uint8Array | number[]
-  }] | [];
-  context: [Principal, Principal];
-};
-
 function toBuffer(v: Uint8Array | number[] | Buffer): Buffer {
   if (Buffer.isBuffer(v)) return v;
   return Buffer.from(v as any);
@@ -76,11 +66,11 @@ function toBase64Url(v: Uint8Array | number[] | Buffer): string {
   return toBuffer(v).toString('base64url');
 }
 
-async function sendWebPushBatch(actor: any, encryptedItems: EncryptedNotification[], env: Env) {
-  log('Preparing to send web-push batch (encrypted):', encryptedItems.length);
-  const tasks = encryptedItems.map(async (encItem, i) => {
-    const enc = encItem.encrypted[0]!;
-    const ce = ('aes128gcm' in encItem.contentEncoding) ? 'aes128gcm' : 'aesgcm';
+async function sendWebPushBatch(actor: any, notifications: CanNotification[], env: Env) {
+  log('Preparing to send web-push batch:', notifications.length);
+  const tasks = notifications.map(async (n, i) => {
+    const enc = n.encrypted[0]!;
+    const ce = ('aes128gcm' in n.contentEncoding) ? 'aes128gcm' : 'aesgcm';
     const lp = toBuffer(enc.localPublicKey);
     const saltBytes = toBuffer(enc.salt);
     const saltB64 = toBase64Url(enc.salt);
@@ -91,7 +81,7 @@ async function sendWebPushBatch(actor: any, encryptedItems: EncryptedNotificatio
     const keyIdLen = Buffer.from([65]);
     const ct = ce === 'aes128gcm' ? Buffer.concat([saltBytes, rs, keyIdLen, lp, ctRaw]) : ctRaw;
     let payload = {
-      endpoint: encItem.endpoint,
+      endpoint: n.endpoint,
       contentEncoding: ce,
       encrypted: {
         localPublicKey: lp,
@@ -140,7 +130,7 @@ async function sendWebPushBatch(actor: any, encryptedItems: EncryptedNotificatio
     log(`Reporting ${brokenSubscriptions.length} broken subscriptions...`);
     try {
       await actor.reportBrokenSubscriptions(brokenSubscriptions.map(index => {
-        return [encryptedItems[index].context[0], encryptedItems[index].context[1], encryptedItems[index].endpoint];
+        return [notifications[index].context[0], notifications[index].context[1], notifications[index].endpoint];
       }));
     } catch (err) {
       console.error(err);
@@ -172,16 +162,16 @@ async function runCycle(env: Env) {
       agent,
       canisterId: env.NOTIFICATION_CANISTER_ID,
     }) as unknown as {
-      peekQueue: () => Promise<EncryptedNotification[]>;
+      peekQueue: () => Promise<CanNotification[]>;
       popQueue: (amount: bigint) => Promise<void>;
     };
     try {
       log('Checking if queue is empty...');
-      const encryptedBatch = await actor.peekQueue();
-      if (encryptedBatch.length > 0) {
-        await sendWebPushBatch(actor, encryptedBatch, env);
+      const batch = await actor.peekQueue();
+      if (batch.length > 0) {
+        await sendWebPushBatch(actor, batch, env);
         log('Reporting sent notifications...');
-        await actor.popQueue(BigInt(encryptedBatch.length));
+        await actor.popQueue(BigInt(batch.length));
       }
     } catch (e: any) {
       err('sub-iteration error:', e?.stack || String(e));

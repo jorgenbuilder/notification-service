@@ -18,7 +18,7 @@ type NotificationBody = record {
 
 type Notification = record {
   endpoint: text;
-  contentEncoding: ContentEncoding;
+  contentEncoding: variant { aesgcm; aes128gcm };
   encrypted: opt record {
     localPublicKey: vec nat8;
     salt: vec nat8;
@@ -26,9 +26,6 @@ type Notification = record {
   };
   context: record { principal; principal };
 };
-
-type ContentEncoding = variant { aesgcm; aes128gcm; };
-
 
 service : (principal) -> {
   // end-user interface
