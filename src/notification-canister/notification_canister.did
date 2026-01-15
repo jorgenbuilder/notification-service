@@ -17,15 +17,6 @@ type NotificationBody = record {
 };
 
 type Notification = record {
-  subscription: Subscription;
-  body: NotificationBody;
-  context: record {
-    application: principal;
-    receiver: principal;
-  };
-};
-
-type EncryptedNotification = record {
   endpoint: text;
   contentEncoding: ContentEncoding;
   encrypted: opt record {
@@ -33,6 +24,7 @@ type EncryptedNotification = record {
     salt: vec nat8;
     cipherText: vec nat8;
   };
+  context: record { principal; principal };
 };
 
 type ContentEncoding = variant { aesgcm; aes128gcm; };
@@ -58,7 +50,6 @@ service : (principal) -> {
 
   // worker interface
   peekQueue: () -> (vec Notification) query;
-  peekQueueEncrypted: () -> (vec EncryptedNotification) query;
   popQueue: (nat64) -> ();
   reportBrokenSubscriptions: (vec record {
     application: principal;

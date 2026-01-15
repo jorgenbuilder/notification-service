@@ -2,7 +2,6 @@ import * as url from "url";
 import * as https from "https";
 import {
   ContentEncoding,
-  PushSubscription,
   RequestDetails,
   RequestOptions,
   SendResult,
@@ -11,9 +10,7 @@ import {
   WebPushError
 } from "web-push";
 import { Agent } from "node:https";
-import crypto from "crypto";
 
-const ece: any = require('http_ece');
 const urlBase64Helper: any = require('web-push/src/urlsafe-base64-helper');
 const vapidHelper: any = require('web-push/src/vapid-helper');
 
@@ -49,16 +46,6 @@ export type EncryptedPayload = {
     salt: string;
     cipherText: Buffer;
   };
-}
-
-// TODO move to canister
-export function encryptPayload(subscription: PushSubscription, payload?: string | Buffer | null, contentEncoding: ContentEncoding = supportedContentEncodings.AES_128_GCM): EncryptedPayload {
-  let ret: EncryptedPayload = { endpoint: subscription.endpoint, contentEncoding };
-  // copy-paste from generateRequestDetails
-  if (payload) {
-    ret.encrypted = encrypt(subscription.keys.p256dh, subscription.keys.auth, payload, contentEncoding);
-  }
-  return ret;
 }
 
 // basically original "sendNotification" function from web-push library with patched signature
@@ -130,61 +117,6 @@ export async function sendEncrypted(payload: EncryptedPayload, options?: Request
     pushRequest.end();
   });
 }
-
-// original function from web-push library
-const encrypt = function (userPublicKey: string, userAuth: string, payload: Buffer | string, contentEncoding: string) {
-  if (!userPublicKey) {
-    throw new Error('No user public key provided for encryption.');
-  }
-
-  if (typeof userPublicKey !== 'string') {
-    throw new Error('The subscription p256dh value must be a string.');
-  }
-
-  if (Buffer.from(userPublicKey, 'base64url').length !== 65) {
-    throw new Error('The subscription p256dh value should be 65 bytes long.');
-  }
-
-  if (!userAuth) {
-    throw new Error('No user auth provided for encryption.');
-  }
-
-  if (typeof userAuth !== 'string') {
-    throw new Error('The subscription auth key must be a string.');
-  }
-
-  if (Buffer.from(userAuth, 'base64url').length < 16) {
-    throw new Error('The subscription auth key should be at least 16 '
-      + 'bytes long');
-  }
-
-  if (typeof payload !== 'string' && !Buffer.isBuffer(payload)) {
-    throw new Error('Payload must be either a string or a Node Buffer.');
-  }
-
-  if (typeof payload === 'string' || payload instanceof String) {
-    payload = Buffer.from(payload);
-  }
-
-  const localCurve = crypto.createECDH('prime256v1');
-  const localPublicKey = localCurve.generateKeys();
-
-  const salt = crypto.randomBytes(16).toString('base64url');
-
-  const cipherText: Buffer = ece.encrypt(payload, {
-    version: contentEncoding,
-    dh: userPublicKey,
-    privateKey: localCurve,
-    salt: salt,
-    authSecret: userAuth
-  });
-
-  return {
-    localPublicKey: localPublicKey,
-    salt: salt,
-    cipherText: cipherText
-  };
-};
 
 // original function from web-push library with patched signature
 async function generateRequestDetails(payload: EncryptedPayload,
@@ -320,9 +252,6 @@ async function generateRequestDetails(payload: EncryptedPayload,
 
     if (contentEncoding === supportedContentEncodings.AES_128_GCM) {
       requestDetails.headers['Content-Encoding'] = supportedContentEncodings.AES_128_GCM;
-      // For aes128gcm, include salt and dh; add standard record size (rs=4096)
-      requestDetails.headers['Encryption'] = 'salt=' + payload.encrypted.salt + '; rs=4096';
-      requestDetails.headers['Crypto-Key'] = 'dh=' + payload.encrypted.localPublicKey.toString('base64url');
     } else if (contentEncoding === supportedContentEncodings.AES_GCM) {
       requestDetails.headers['Content-Encoding'] = supportedContentEncodings.AES_GCM;
       requestDetails.headers['Encryption'] = 'salt=' + payload.encrypted.salt;
@@ -360,10 +289,10 @@ async function generateRequestDetails(payload: EncryptedPayload,
 
     requestDetails.headers['Authorization'] = vapidHeaders.Authorization;
 
-    // Always include VAPID Crypto-Key parameter, for both aesgcm and aes128gcm (only if defined)
-    if (vapidHeaders['Crypto-Key']) {
+    if (contentEncoding === supportedContentEncodings.AES_GCM) {
       if (requestDetails.headers['Crypto-Key']) {
-        requestDetails.headers['Crypto-Key'] += ';' + vapidHeaders['Crypto-Key'];
+        requestDetails.headers['Crypto-Key'] += ';'
+          + vapidHeaders['Crypto-Key'];
       } else {
         requestDetails.headers['Crypto-Key'] = vapidHeaders['Crypto-Key'];
       }

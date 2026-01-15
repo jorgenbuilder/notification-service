@@ -241,18 +241,6 @@ async fn sendNotifications(arg: Vec<(Principal, NotificationBody)>) {
 }
 
 // Worker interface
-#[query]
-fn peekQueue() -> Vec<Notification> {
-    let caller = api::caller();
-    STATE.with(|s| {
-        let st = s.borrow();
-        if caller != st.worker {
-            trap("Only worker can use this interface");
-        }
-        st.notifications_queue.iter().take(10).cloned().collect()
-    })
-}
-
 #[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EncryptedData {
     pub localPublicKey: Vec<u8>,
@@ -269,10 +257,11 @@ pub enum ContentEncoding {
 }
 
 #[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EncryptedPayloadItem {
+pub struct EncryptedNotification {
     pub endpoint: String,
     pub contentEncoding: ContentEncoding,
     pub encrypted: Option<EncryptedData>,
+    pub context: (Principal, Principal),
 }
 
 fn b64url_decode(input: &str) -> Option<Vec<u8>> {
@@ -282,7 +271,7 @@ fn b64url_decode(input: &str) -> Option<Vec<u8>> {
 }
 
 #[query]
-fn peekQueueEncrypted() -> Vec<EncryptedPayloadItem> {
+fn peekQueue() -> Vec<EncryptedNotification> {
     let caller = api::caller();
     STATE.with(|s| {
         let st = s.borrow();
@@ -315,10 +304,11 @@ fn peekQueueEncrypted() -> Vec<EncryptedPayloadItem> {
                     _ => None,
                 };
 
-                EncryptedPayloadItem {
+                EncryptedNotification {
                     endpoint: n.subscription.endpoint.clone(),
                     contentEncoding: ContentEncoding::Aes128Gcm,
                     encrypted,
+                    context: n.context.clone(),
                 }
             })
             .collect()
@@ -333,9 +323,7 @@ fn encrypt_webpush_aes128gcm(user_public_key: &[u8], auth_secret: &[u8], payload
     use aes_gcm::Nonce;
     use hkdf::Hkdf;
     use p256::{PublicKey as P256PublicKey, SecretKey as P256SecretKey};
-    use p256::elliptic_curve::sec1::{ToEncodedPoint, FromEncodedPoint};
-    use p256::elliptic_curve::point::AffineCoordinates;
-    use p256::elliptic_curve::scalar::NonZeroScalar;
+    use p256::elliptic_curve::sec1::{ToEncodedPoint};
     use sha2::{Digest, Sha256};
 
     // Validate inputs
