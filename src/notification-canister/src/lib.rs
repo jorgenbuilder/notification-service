@@ -249,8 +249,191 @@ fn peekQueue() -> Vec<Notification> {
         if caller != st.worker {
             trap("Only worker can use this interface");
         }
-        st.notifications_queue.iter().take(100).cloned().collect()
+        st.notifications_queue.iter().take(10).cloned().collect()
     })
+}
+
+#[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EncryptedData {
+    pub localPublicKey: Vec<u8>,
+    pub salt: Vec<u8>,
+    pub cipherText: Vec<u8>,
+}
+
+#[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ContentEncoding {
+    #[serde(rename = "aesgcm")]
+    AesGcm,
+    #[serde(rename = "aes128gcm")]
+    Aes128Gcm,
+}
+
+#[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EncryptedPayloadItem {
+    pub endpoint: String,
+    pub contentEncoding: ContentEncoding,
+    pub encrypted: Option<EncryptedData>,
+}
+
+fn b64url_decode(input: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    engine.decode(input.as_bytes()).ok()
+}
+
+#[query]
+fn peekQueueEncrypted() -> Vec<EncryptedPayloadItem> {
+    let caller = api::caller();
+    STATE.with(|s| {
+        let st = s.borrow();
+        if caller != st.worker {
+            trap("Only worker can use this interface");
+        }
+        st.notifications_queue
+            .iter()
+            .take(10)
+            .map(|n| {
+                let mut obj = serde_json::json!({
+                    "title": n.body.title,
+                    "body": n.body.content,
+                });
+                if let Some(url) = &n.body.url { obj["url"] = serde_json::Value::String(url.clone()); }
+                if let Some(tag) = &n.body.tag { obj["tag"] = serde_json::Value::String(tag.clone()); }
+                let payload_bytes = serde_json::to_vec(&obj).unwrap_or_else(|_| Vec::new());
+
+                let encrypted = match (b64url_decode(&n.subscription.keys.p256dh), b64url_decode(&n.subscription.keys.auth)) {
+                    (Some(user_pubkey), Some(auth_secret)) => {
+                        match encrypt_webpush_aes128gcm(&user_pubkey, &auth_secret, &payload_bytes) {
+                            Some((local_public_key, salt, cipher_text)) => Some(EncryptedData {
+                                localPublicKey: local_public_key,
+                                salt,
+                                cipherText: cipher_text,
+                            }),
+                            None => None,
+                        }
+                    }
+                    _ => None,
+                };
+
+                EncryptedPayloadItem {
+                    endpoint: n.subscription.endpoint.clone(),
+                    contentEncoding: ContentEncoding::Aes128Gcm,
+                    encrypted,
+                }
+            })
+            .collect()
+    })
+}
+
+fn encrypt_webpush_aes128gcm(user_public_key: &[u8], auth_secret: &[u8], payload: &[u8]) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    // Deterministic, query-safe Web Push AES-128-GCM per RFC 8291/8188.
+    // No RNG used; all values derived from stable inputs via HKDF-SHA256.
+    use aes_gcm::{Aes128Gcm};
+    use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::Nonce;
+    use hkdf::Hkdf;
+    use p256::{PublicKey as P256PublicKey, SecretKey as P256SecretKey};
+    use p256::elliptic_curve::sec1::{ToEncodedPoint, FromEncodedPoint};
+    use p256::elliptic_curve::point::AffineCoordinates;
+    use p256::elliptic_curve::scalar::NonZeroScalar;
+    use sha2::{Digest, Sha256};
+
+    // Validate inputs
+    if user_public_key.len() != 65 || user_public_key[0] != 0x04 || auth_secret.len() < 16 {
+        return None;
+    }
+
+    // Parse subscriber public key (client key)
+    let client_pub = P256PublicKey::from_sec1_bytes(user_public_key).ok()?;
+
+    // Hash of payload for uniqueness in derivation
+    let payload_hash = {
+        let mut h = Sha256::new();
+        h.update(payload);
+        h.finalize().to_vec()
+    };
+
+    // Derive base HKDF from stable inputs
+    let mut hkdf_ikm = Vec::with_capacity(16 + user_public_key.len() + auth_secret.len() + payload_hash.len());
+    hkdf_ikm.extend_from_slice(b"ic-webpush-v1");
+    hkdf_ikm.extend_from_slice(user_public_key);
+    hkdf_ikm.extend_from_slice(auth_secret);
+    hkdf_ikm.extend_from_slice(&payload_hash);
+
+    let hk = Hkdf::<Sha256>::new(None, &hkdf_ikm);
+
+    // Derive 16-byte salt (RFC 8188 salt)
+    let mut salt = [0u8; 16];
+    if hk.expand(b"wp-salt", &mut salt).is_err() { return None; }
+
+    // Derive ephemeral secret key deterministically; ensure non-zero scalar
+    let mut ctr: u32 = 0;
+    let eph_sk = loop {
+        let mut sk_bytes = [0u8; 32];
+        // domain separated by counter to avoid bias/zero
+        let mut info = Vec::with_capacity(32);
+        info.extend_from_slice(b"wp-epk");
+        info.extend_from_slice(&ctr.to_be_bytes());
+        if hk.expand(&info, &mut sk_bytes).is_err() { return None; }
+        if let Ok(sk) = P256SecretKey::from_slice(&sk_bytes) {
+            break sk;
+        }
+        ctr = ctr.wrapping_add(1);
+        if ctr == 0 { return None; }
+    };
+
+    // Ephemeral public key (server key)
+    let eph_pub_point = eph_sk.public_key().to_encoded_point(false);
+    let eph_pub_uncompressed = eph_pub_point.as_bytes().to_vec();
+
+    // Compute ECDH shared secret using P-256 diffie_hellman
+    let shared_secret = {
+        use p256::ecdh::diffie_hellman;
+        let ss = diffie_hellman(eph_sk.to_nonzero_scalar(), client_pub.as_affine());
+        ss.raw_secret_bytes().as_slice().to_vec()
+    };
+
+    // RFC 8291/8188 key schedule (Web Push) — align with http_ece:
+    // 1) PRK_auth = HKDF-Extract(salt = auth_secret, IKM = shared_secret)
+    let (prk_auth, _salt_unused) = Hkdf::<Sha256>::extract(Some(auth_secret), &shared_secret);
+
+    // Build WebPush info context per http_ece (no length prefixes): "WebPush: info" 0x00 || receiver_pub || sender_pub
+    let mut context = Vec::with_capacity(2 + 65 + 65);
+    context.extend_from_slice(b"WebPush: info");
+    context.push(0u8);
+    context.extend_from_slice(user_public_key);
+    context.extend_from_slice(&eph_pub_uncompressed);
+
+    // http_ece aes128gcm derivation aligned to RFC 8291/8188 and node-http_ece:
+    // secret = HKDF-Expand(PRK_auth, context, 32)
+    let hk_auth = Hkdf::<Sha256>::from_prk(prk_auth.as_ref()).ok()?;
+    let mut secret32 = [0u8; 32];
+    if hk_auth.expand(&context, &mut secret32).is_err() { return None; }
+
+    // prk = HKDF-Extract(salt, secret)
+    let (prk, _salt2_unused) = Hkdf::<Sha256>::extract(Some(&salt), &secret32);
+
+    // key = HKDF-Expand(prk, "Content-Encoding: aes128gcm\0", 16)
+    // nonce = HKDF-Expand(prk, "Content-Encoding: nonce\0", 12)
+    let key_info: &[u8] = b"Content-Encoding: aes128gcm\0";
+    let nonce_info: &[u8] = b"Content-Encoding: nonce\0";
+
+    let hk_prk = Hkdf::<Sha256>::from_prk(prk.as_ref()).ok()?;
+    let mut cek = [0u8; 16];
+    if hk_prk.expand(&key_info, &mut cek).is_err() { return None; }
+    let mut nonce = [0u8; 12];
+    if hk_prk.expand(&nonce_info, &mut nonce).is_err() { return None; }
+
+    // aes128gcm plaintext framing: payload || 0x02 (last record)
+    let mut plaintext = Vec::with_capacity(payload.len() + 1);
+    plaintext.extend_from_slice(payload);
+    plaintext.push(0x02);
+
+    let cipher = Aes128Gcm::new_from_slice(&cek).ok()?;
+    let nonce = Nonce::from_slice(&nonce);
+    let ciphertext = cipher.encrypt(nonce, plaintext.as_ref()).ok()?;
+
+    Some((eph_pub_uncompressed, salt.to_vec(), ciphertext))
 }
 
 #[update]
@@ -288,4 +471,196 @@ async fn reportBrokenSubscriptions(arg: Vec<(Principal, Principal, String)>) {
 fn export_candid() -> String {
     export_service!();
     __export_service()
+}
+
+
+#[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugEncryptedItem {
+    pub endpoint: String,
+    pub salt: Vec<u8>,
+    pub localPublicKey: Vec<u8>,
+    pub ephemeralPrivateKey: Vec<u8>,
+    pub context: Vec<u8>,
+    pub sharedSecret: Vec<u8>,
+    pub prkAuth: Vec<u8>,
+    pub prk: Vec<u8>,
+    pub cek: Vec<u8>,
+    pub nonce: Vec<u8>,
+    pub plaintextHead: Vec<u8>,
+    pub cipherText: Vec<u8>,
+}
+
+#[query]
+fn peekQueueEncryptedDebug() -> Vec<DebugEncryptedItem> {
+    let caller = api::caller();
+    STATE.with(|s| {
+        let st = s.borrow();
+        st.notifications_queue
+            .iter()
+            .take(1)
+            .filter_map(|n| {
+                let mut obj = serde_json::json!({
+                    "title": n.body.title,
+                    "body": n.body.content,
+                });
+                if let Some(url) = &n.body.url { obj["url"] = serde_json::Value::String(url.clone()); }
+                if let Some(tag) = &n.body.tag { obj["tag"] = serde_json::Value::String(tag.clone()); }
+                let payload_bytes = serde_json::to_vec(&obj).ok()?;
+                let user_pub = b64url_decode(&n.subscription.keys.p256dh)?;
+                let auth = b64url_decode(&n.subscription.keys.auth)?;
+                debug_compute_components(&user_pub, &auth, &payload_bytes).map(|c| DebugEncryptedItem {
+                    endpoint: n.subscription.endpoint.clone(),
+                    salt: c.salt,
+                    localPublicKey: c.local_pk,
+                    ephemeralPrivateKey: c.ephemeral_sk,
+                    context: c.context,
+                    sharedSecret: c.shared,
+                    prkAuth: c.prk_auth,
+                    prk: c.prk,
+                    cek: c.cek,
+                    nonce: c.nonce,
+                    plaintextHead: c.plaintext_head,
+                    cipherText: c.ciphertext,
+                })
+            })
+            .collect()
+    })
+}
+
+struct Components {
+    ephemeral_sk: Vec<u8>,
+    local_pk: Vec<u8>,
+    salt: Vec<u8>,
+    context: Vec<u8>,
+    shared: Vec<u8>,
+    prk_auth: Vec<u8>,
+    prk: Vec<u8>,
+    cek: Vec<u8>,
+    nonce: Vec<u8>,
+    plaintext_head: Vec<u8>,
+    ciphertext: Vec<u8>,
+}
+
+fn debug_compute_components(user_public_key: &[u8], auth_secret: &[u8], payload: &[u8]) -> Option<Components> {
+    use aes_gcm::{Aes128Gcm};
+    use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::Nonce;
+    use hkdf::Hkdf;
+    use p256::{PublicKey as P256PublicKey, SecretKey as P256SecretKey};
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use p256::elliptic_curve::scalar::NonZeroScalar;
+    use sha2::{Digest, Sha256};
+
+    if user_public_key.len() != 65 || user_public_key[0] != 0x04 || auth_secret.len() < 16 {
+        return None;
+    }
+    let client_pub = P256PublicKey::from_sec1_bytes(user_public_key).ok()?;
+
+    let payload_hash = {
+        let mut h = Sha256::new();
+        h.update(payload);
+        h.finalize().to_vec()
+    };
+
+    // Deterministic salt and ephemeral key derivation (same as main path)
+    let mut hkdf_ikm = Vec::with_capacity(16 + user_public_key.len() + auth_secret.len() + payload_hash.len());
+    hkdf_ikm.extend_from_slice(b"ic-webpush-v1");
+    hkdf_ikm.extend_from_slice(user_public_key);
+    hkdf_ikm.extend_from_slice(auth_secret);
+    hkdf_ikm.extend_from_slice(&payload_hash);
+    let hk = Hkdf::<Sha256>::new(None, &hkdf_ikm);
+
+    let mut salt = [0u8; 16];
+    if hk.expand(b"wp-salt", &mut salt).is_err() { return None; }
+
+    let mut ctr: u32 = 0;
+    let (eph_sk, eph_sk_bytes) = loop {
+        let mut sk_bytes = [0u8; 32];
+        let mut info = Vec::with_capacity(32);
+        info.extend_from_slice(b"wp-epk");
+        info.extend_from_slice(&ctr.to_be_bytes());
+        if hk.expand(&info, &mut sk_bytes).is_err() { return None; }
+        if let Ok(sk) = P256SecretKey::from_slice(&sk_bytes) {
+            break (sk, sk_bytes.to_vec());
+        }
+        ctr = ctr.wrapping_add(1);
+        if ctr == 0 { return None; }
+    };
+
+    let eph_pub_point = eph_sk.public_key().to_encoded_point(false);
+    let eph_pub_uncompressed = eph_pub_point.as_bytes().to_vec();
+
+    // ECDH
+    let shared_secret = {
+        use p256::ecdh::diffie_hellman;
+        let ss = diffie_hellman(eph_sk.to_nonzero_scalar(), client_pub.as_affine());
+        ss.raw_secret_bytes().as_slice().to_vec()
+    };
+
+    // HKDF aligned to http_ece: PRK_auth = Extract(auth, shared), secret = Expand(PRK_auth, context, 32)
+    let (prk_auth, _salt_unused) = Hkdf::<Sha256>::extract(Some(auth_secret), &shared_secret);
+
+    fn len_prefix_2(len: usize) -> [u8;2] { [(len >> 8) as u8, (len & 0xff) as u8] }
+    let mut context = Vec::with_capacity(2 + 65 + 2 + 65 + 12);
+    context.extend_from_slice(b"WebPush: info");
+    context.push(0u8);
+    context.extend_from_slice(&len_prefix_2(user_public_key.len()));
+    context.extend_from_slice(user_public_key);
+    context.extend_from_slice(&len_prefix_2(eph_pub_uncompressed.len()));
+    context.extend_from_slice(&eph_pub_uncompressed);
+
+    // secret = HKDF-Expand(PRK_auth, context, 32)
+    let hk_auth = Hkdf::<Sha256>::from_prk(prk_auth.as_ref()).ok()?;
+    let mut secret32 = [0u8; 32];
+    if hk_auth.expand(&context, &mut secret32).is_err() { return None; }
+
+    // PRK = HKDF-Extract(salt, secret)
+    let (prk, _salt2_unused) = Hkdf::<Sha256>::extract(Some(&salt), &secret32);
+
+    let mut key_info = Vec::with_capacity(32 + context.len());
+    key_info.extend_from_slice(b"Content-Encoding: aes128gcm");
+    key_info.push(0u8);
+    key_info.extend_from_slice(&context);
+    let mut nonce_info = Vec::with_capacity(32 + context.len());
+    nonce_info.extend_from_slice(b"Content-Encoding: nonce");
+    nonce_info.push(0u8);
+    nonce_info.extend_from_slice(&context);
+
+    let hk_prk = Hkdf::<Sha256>::from_prk(prk.as_ref()).ok()?;
+    let mut cek = [0u8; 16];
+    if hk_prk.expand(&key_info, &mut cek).is_err() { return None; }
+    let mut nonce = [0u8; 12];
+    if hk_prk.expand(&nonce_info, &mut nonce).is_err() { return None; }
+
+    // aes128gcm plaintext framing: 2-byte pad length (0) followed by payload
+    let mut plaintext = Vec::with_capacity(2 + payload.len());
+    plaintext.extend_from_slice(&[0x00, 0x00]);
+    plaintext.extend_from_slice(payload);
+
+    let cipher = Aes128Gcm::new_from_slice(&cek).ok()?;
+    let nonce_ga = Nonce::from_slice(&nonce);
+    let ciphertext = cipher.encrypt(nonce_ga, plaintext.as_ref()).ok()?;
+
+    let head_len = core::cmp::min(16, plaintext.len());
+    let plaintext_head = plaintext[..head_len].to_vec();
+
+    // Materialize PRK bytes for debugging
+    let mut prk_auth_bytes = [0u8; 32];
+    if Hkdf::<Sha256>::from_prk(prk_auth.as_ref()).ok()?.expand(&[], &mut prk_auth_bytes).is_err() { return None; }
+    let mut prk_bytes = [0u8; 32];
+    if Hkdf::<Sha256>::from_prk(prk.as_ref()).ok()?.expand(&[], &mut prk_bytes).is_err() { return None; }
+
+    Some(Components {
+        ephemeral_sk: eph_sk_bytes,
+        local_pk: eph_pub_uncompressed,
+        salt: salt.to_vec(),
+        context,
+        shared: shared_secret.clone(),
+        prk_auth: prk_auth_bytes.to_vec(),
+        prk: prk_bytes.to_vec(),
+        cek: cek.to_vec(),
+        nonce: nonce.to_vec(),
+        plaintext_head,
+        ciphertext,
+    })
 }

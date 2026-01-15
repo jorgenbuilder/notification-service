@@ -13,3 +13,16 @@ ic-cdk-macros = "0.13"
 candid = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
+serde_json = "1.0"
+base64 = { version = "0.21", default-features = false, features = ["alloc"] }
+# Pure-Rust crypto crates for future deterministic AES-128-GCM web-push implementation (no OpenSSL)
+p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdh"] }
+hkdf = { version = "0.12", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes","alloc"] }
+
+aes = { version = "0.8", default-features = false }
+
+[features]
+# No features required; keep default empty to avoid bringing in system libraries like OpenSSL
+default = []

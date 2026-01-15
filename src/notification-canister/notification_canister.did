@@ -25,6 +25,30 @@ type Notification = record {
   };
 };
 
+type EncryptedNotification = record {
+  endpoint: text;
+  contentEncoding: ContentEncoding;
+  encrypted: opt record {
+    localPublicKey: vec nat8;
+    salt: vec nat8;
+    cipherText: vec nat8;
+  };
+};
+
+type ContentEncoding = variant { aesgcm; aes128gcm; };
+
+type DebugEncryptedItem = record {
+  endpoint: text;
+  salt: vec nat8;
+  localPublicKey: vec nat8;
+  ephemeralPrivateKey: vec nat8;
+  context: vec nat8;
+  cek: vec nat8;
+  nonce: vec nat8;
+  plaintextHead: vec nat8;
+  cipherText: vec nat8;
+};
+
 service : (principal) -> {
   // end-user interface
   getVapidPublicKey: () -> (text) query;
@@ -45,6 +69,7 @@ service : (principal) -> {
 
   // worker interface
   peekQueue: () -> (vec Notification) query;
+  peekQueueEncrypted: () -> (vec EncryptedNotification) query;
   popQueue: (nat64) -> ();
   reportBrokenSubscriptions: (vec record {
     application: principal;

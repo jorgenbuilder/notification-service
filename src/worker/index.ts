@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { Actor, HttpAgent } from '@dfinity/agent';
 import { Ed25519KeyIdentity } from '@dfinity/identity';
 import { Principal } from '@dfinity/principal';
-import { encryptPayload, sendEncrypted } from './web-push-helper';
+import { sendEncrypted, encryptPayload } from './web-push-helper';
 
 export interface Env {
   IC_HOST: string;
@@ -45,8 +45,31 @@ const idlFactory = ({ IDL }: { IDL: typeof import('@dfinity/candid').IDL }) => {
     subscription: Subscription,
     body: NotificationBody,
   });
+  const ContentEncoding = IDL.Variant({ aesgcm: IDL.Null, aes128gcm: IDL.Null });
+  const EncryptedData = IDL.Record({
+    localPublicKey: IDL.Vec(IDL.Nat8),
+    salt: IDL.Vec(IDL.Nat8),
+    cipherText: IDL.Vec(IDL.Nat8),
+  });
+  const EncryptedNotification = IDL.Record({
+    endpoint: Text,
+    contentEncoding: ContentEncoding,
+    encrypted: IDL.Opt(EncryptedData),
+  });
+  const DebugEncryptedItem = IDL.Record({
+    endpoint: Text,
+    salt: IDL.Vec(IDL.Nat8),
+    localPublicKey: IDL.Vec(IDL.Nat8),
+    ephemeralPrivateKey: IDL.Vec(IDL.Nat8),
+    context: IDL.Vec(IDL.Nat8),
+    cek: IDL.Vec(IDL.Nat8),
+    nonce: IDL.Vec(IDL.Nat8),
+    cipherText: IDL.Vec(IDL.Nat8),
+  });
   return IDL.Service({
     peekQueue: IDL.Func([], [IDL.Vec(Notification)], ['query']),
+    peekQueueEncrypted: IDL.Func([], [IDL.Vec(EncryptedNotification)], ['query']),
+    peekQueueEncryptedDebug: IDL.Func([], [IDL.Vec(DebugEncryptedItem)], ['query']),
     popQueue: IDL.Func([IDL.Nat64], [], []),
     reportBrokenSubscriptions: IDL.Func(
       [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Principal, IDL.Text))],
@@ -67,44 +90,93 @@ function identityFromBase64Secret(b64: string): Ed25519KeyIdentity {
   return Ed25519KeyIdentity.fromSecretKey(raw);
 }
 
-async function sendWebPushBatch(actor: any, notifications: CanNotification[], env: Env) {
-  log('Preparing to send web-push batch:', notifications.length);
-  const tasks = notifications.map(async (n, i) => {
-    let result;
-    try {
-      const payload = encryptPayload(
-        {
-          endpoint: n.subscription.endpoint,
-          expirationTime: n.subscription.expirationTime.length ? n.subscription.expirationTime[0] : null,
-          keys: {
-            p256dh: n.subscription.keys.p256dh,
-            auth: n.subscription.keys.auth,
-          },
+type EncryptedData = { localPublicKey: Uint8Array | number[]; salt: Uint8Array | number[]; cipherText: Uint8Array | number[] };
+
+type EncryptedNotification = {
+  endpoint: string;
+  contentEncoding: { aesgcm?: null; aes128gcm?: null };
+  encrypted: [{ localPublicKey: Uint8Array | number[]; salt: Uint8Array | number[]; cipherText: Uint8Array | number[] }] | [];
+};
+
+function decodeContentEncoding(v: { aesgcm?: null; aes128gcm?: null }): 'aesgcm' | 'aes128gcm' {
+  return (v && Object.prototype.hasOwnProperty.call(v, 'aes128gcm')) ? 'aes128gcm' : 'aesgcm';
+}
+
+function toBuffer(v: Uint8Array | number[] | Buffer): Buffer {
+  if (Buffer.isBuffer(v)) return v;
+  return Buffer.from(v as any);
+}
+
+function toBase64Url(v: Uint8Array | number[] | Buffer): string {
+  return toBuffer(v).toString('base64url');
+}
+
+async function sendWebPushBatch(actor: any, encryptedItems: EncryptedNotification[], contexts: CanNotification[], env: Env) {
+  const FORCE_LOCAL = process.env.FORCE_LOCAL_ENCRYPTION === '1';
+  const n = Math.min(encryptedItems.length, contexts.length);
+  log('Preparing to send web-push batch (encrypted):', n);
+  const tasks = Array.from({ length: n }).map(async (_, i) => {
+    const encItem = encryptedItems[i];
+    const ctx = contexts[i];
+
+    // Ensure encryption payload is present; if missing, fall back to local encryption
+    let payload: any;
+    const sub = contexts[i].subscription;
+    const bodyObj: any = { title: contexts[i].body.title, body: contexts[i].body.content };
+    if (sub && contexts[i].body.url && contexts[i].body.url.length > 0) bodyObj.url = contexts[i].body.url[0];
+    if (sub && contexts[i].body.tag && contexts[i].body.tag.length > 0) bodyObj.tag = contexts[i].body.tag[0];
+
+    if (FORCE_LOCAL || !encItem.encrypted || encItem.encrypted.length === 0) {
+      if (FORCE_LOCAL) {
+        warn('[DEBUG_LOG][batch] FORCE_LOCAL_ENCRYPTION=1 active — using local encryption for index', i);
+      } else {
+        warn('Encrypted payload missing for item index', i, '- falling back to local encryption.');
+      }
+      const fallback = encryptPayload({ endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth } } as any, JSON.stringify(bodyObj));
+      payload = fallback as any;
+    } else {
+      const enc = encItem.encrypted[0];
+      const ce = decodeContentEncoding(encItem.contentEncoding);
+      const lp = toBuffer(enc.localPublicKey);
+      const saltBytes = toBuffer(enc.salt);
+      const saltB64 = toBase64Url(enc.salt);
+      const ctRaw = toBuffer(enc.cipherText);
+      // For aes128gcm, http_ece body format is: salt (16) || rs (4, BE) || keyid_len (1=65) || dh (65) || ciphertext
+      const rs = Buffer.alloc(4); rs.writeUInt32BE(4096, 0);
+      const keyIdLen = Buffer.from([65]);
+      const ct = ce === 'aes128gcm' ? Buffer.concat([saltBytes, rs, keyIdLen, lp, ctRaw]) : ctRaw;
+      log('[DEBUG_LOG][batch] using canister encryption for index', i,
+          'ce=', ce,
+          'lp.len=', lp.length,
+          'salt.len=', saltBytes.length,
+          'salt.b64.first12=', saltB64.slice(0, 12),
+          'ct.len=', ct.length);
+      payload = {
+        endpoint: encItem.endpoint,
+        contentEncoding: ce,
+        encrypted: {
+          localPublicKey: lp,
+          salt: saltB64,
+          cipherText: ct,
         },
-        JSON.stringify({
-          title: n.body.title,
-          body: n.body.content,
-          url: n.body.url.length ? n.body.url[0] : undefined,
-          tag: n.body.tag.length ? n.body.tag[0] : undefined,
-        })
-      )
-      result = await sendEncrypted(
-        payload,
-        {
-          TTL: 60 * 60, // 1 hour
-          vapidDetails: {
-            subject: env.VAPID_SUBJECT,
-            publicKey: env.VAPID_PUBLIC_KEY,
-            privateKey: env.VAPID_PRIVATE_KEY,
-          },
-          headers: {
-            Urgency: 'normal',
-          },
-        }
-      );
-    } catch (err) {
-      throw new Error(String(err) + ". Response body: " + (err as any).body);
+      } as const;
     }
+
+    const result = await sendEncrypted(
+      payload as any,
+      {
+        TTL: 60 * 60, // 1 hour
+        vapidDetails: {
+          subject: env.VAPID_SUBJECT,
+          publicKey: env.VAPID_PUBLIC_KEY,
+          privateKey: env.VAPID_PRIVATE_KEY,
+        },
+        headers: {
+          Urgency: 'normal',
+        },
+      }
+    );
+
     const status = result.statusCode ?? 0;
     if (!(status >= 200 && status < 300)) {
       const text = (result.body && typeof result.body === 'string') ? result.body : '';
@@ -131,7 +203,7 @@ async function sendWebPushBatch(actor: any, notifications: CanNotification[], en
     log(`Reporting ${brokenSubscriptions.length} broken subscriptions...`);
     try {
       await actor.reportBrokenSubscriptions(brokenSubscriptions.map(index => {
-        let notification = notifications[index];
+        const notification = contexts[index];
         return [notification.context[0], notification.context[1], notification.subscription.endpoint];
       }));
     } catch (err) {
@@ -165,15 +237,20 @@ async function runCycle(env: Env) {
       canisterId: env.NOTIFICATION_CANISTER_ID,
     }) as unknown as {
       peekQueue: () => Promise<CanNotification[]>;
+      peekQueueEncrypted: () => Promise<EncryptedNotification[]>;
       popQueue: (amount: bigint) => Promise<void>;
     };
     try {
       log('Checking if queue is empty...');
-      const batch = await actor.peekQueue();
-      if (batch.length > 0) {
-        await sendWebPushBatch(actor, batch, env);
+      const [encryptedBatch, contexts] = await Promise.all([
+        actor.peekQueueEncrypted(),
+        actor.peekQueue(),
+      ]);
+      const n = Math.min(encryptedBatch.length, contexts.length);
+      if (n > 0) {
+        await sendWebPushBatch(actor, encryptedBatch.slice(0, n), contexts.slice(0, n), env);
         log('Reporting sent notifications...');
-        await actor.popQueue(BigInt(batch.length));
+        // await actor.popQueue(BigInt(n));
       }
     } catch (e: any) {
       err('sub-iteration error:', e?.stack || String(e));
