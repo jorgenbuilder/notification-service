@@ -69,41 +69,41 @@ function toBase64Url(v: Uint8Array | number[] | Buffer): string {
 async function sendWebPushBatch(actor: any, notifications: CanNotification[], env: Env) {
   log('Preparing to send web-push batch:', notifications.length);
   const tasks = notifications.map(async (n, i) => {
-    const enc = n.encrypted[0]!;
-    const ce = ('aes128gcm' in n.contentEncoding) ? 'aes128gcm' : 'aesgcm';
-    const lp = toBuffer(enc.localPublicKey);
-    const saltBytes = toBuffer(enc.salt);
-    const saltB64 = toBase64Url(enc.salt);
-    const ctRaw = toBuffer(enc.cipherText);
-    // For aes128gcm, http_ece body format is: salt (16) || rs (4, BE) || keyid_len (1=65) || dh (65) || ciphertext
-    const rs = Buffer.alloc(4);
-    rs.writeUInt32BE(4096, 0);
-    const keyIdLen = Buffer.from([65]);
-    const ct = ce === 'aes128gcm' ? Buffer.concat([saltBytes, rs, keyIdLen, lp, ctRaw]) : ctRaw;
-    let payload = {
-      endpoint: n.endpoint,
-      contentEncoding: ce,
-      encrypted: {
-        localPublicKey: lp,
-        salt: saltB64,
-        cipherText: ct,
-      },
-    } as const;
-    const result = await sendEncrypted(
-      payload as any,
-      {
-        TTL: 60 * 60, // 1 hour
-        vapidDetails: {
-          subject: env.VAPID_SUBJECT,
-          publicKey: env.VAPID_PUBLIC_KEY,
-          privateKey: env.VAPID_PRIVATE_KEY,
+    let result;
+    try {
+      const enc = n.encrypted[0]!;
+      const ce = ('aes128gcm' in n.contentEncoding) ? 'aes128gcm' : 'aesgcm';
+      // For aes128gcm, http_ece body format is: salt (16) || rs (4, BE) || keyid_len (1=65) || dh (65) || ciphertext
+      const rs = Buffer.alloc(4);
+      rs.writeUInt32BE(4096, 0);
+      const keyIdLen = Buffer.from([65]);
+      result = await sendEncrypted(
+        {
+          endpoint: n.endpoint,
+          contentEncoding: ce,
+          encrypted: {
+            localPublicKey: toBuffer(enc.localPublicKey),
+            salt: toBase64Url(enc.salt),
+            cipherText: ce === 'aes128gcm'
+              ? Buffer.concat([toBuffer(enc.salt), rs, keyIdLen, toBuffer(enc.localPublicKey), toBuffer(enc.cipherText)])
+              : toBuffer(enc.cipherText),
+          },
         },
-        headers: {
-          Urgency: 'normal',
-        },
-      }
-    );
-
+        {
+          TTL: 60 * 60, // 1 hour
+          vapidDetails: {
+            subject: env.VAPID_SUBJECT,
+            publicKey: env.VAPID_PUBLIC_KEY,
+            privateKey: env.VAPID_PRIVATE_KEY,
+          },
+          headers: {
+            Urgency: 'normal',
+          },
+        }
+      );
+    } catch (err) {
+      throw new Error(String(err) + ". Response body: " + (err as any).body);
+    }
     const status = result.statusCode ?? 0;
     if (!(status >= 200 && status < 300)) {
       const text = result.body || '';
