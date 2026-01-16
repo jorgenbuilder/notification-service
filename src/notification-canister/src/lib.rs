@@ -1,8 +1,8 @@
+use candid::export_service;
 use candid::{CandidType, Principal};
 use ic_cdk::api;
-use serde::{Deserialize, Serialize};
-use candid::export_service;
 use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 
@@ -280,7 +280,7 @@ fn peekQueue() -> Vec<EncryptedNotification> {
         }
 
         let start_ic = api::instruction_counter();
-        let mut result: Vec<EncryptedNotification> = Vec::with_capacity(50);
+        let mut result: Vec<EncryptedNotification> = Vec::with_capacity(100);
 
         for n in st.notifications_queue.iter() {
             let mut obj = serde_json::json!({
@@ -312,11 +312,7 @@ fn peekQueue() -> Vec<EncryptedNotification> {
                 context: n.context.clone(),
             });
 
-            if result.len() >= 50 {
-                break;
-            }
-            let spent = api::instruction_counter().saturating_sub(start_ic);
-            if spent > 1_500_000_000u64 {
+            if result.len() >= 100 || api::instruction_counter().saturating_sub(start_ic) > 2_000_000_000u64 {
                 break;
             }
         }
@@ -328,12 +324,12 @@ fn peekQueue() -> Vec<EncryptedNotification> {
 fn encrypt_webpush_aes128gcm(user_public_key: &[u8], auth_secret: &[u8], payload: &[u8]) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     // Deterministic, query-safe Web Push AES-128-GCM per RFC 8291/8188.
     // No RNG used; all values derived from stable inputs via HKDF-SHA256.
-    use aes_gcm::{Aes128Gcm};
+    use aes_gcm::Aes128Gcm;
     use aes_gcm::aead::{Aead, KeyInit};
     use aes_gcm::Nonce;
     use hkdf::Hkdf;
     use p256::{PublicKey as P256PublicKey, SecretKey as P256SecretKey};
-    use p256::elliptic_curve::sec1::{ToEncodedPoint};
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
     use sha2::{Digest, Sha256};
 
     // Validate inputs
