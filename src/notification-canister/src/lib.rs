@@ -278,40 +278,50 @@ fn peekQueue() -> Vec<EncryptedNotification> {
         if caller != st.worker {
             trap("Only worker can use this interface");
         }
-        st.notifications_queue
-            .iter()
-            .take(10)
-            .map(|n| {
-                let mut obj = serde_json::json!({
-                    "title": n.body.title,
-                    "body": n.body.content,
-                });
-                if let Some(url) = &n.body.url { obj["url"] = serde_json::Value::String(url.clone()); }
-                if let Some(tag) = &n.body.tag { obj["tag"] = serde_json::Value::String(tag.clone()); }
-                let payload_bytes = serde_json::to_vec(&obj).unwrap_or_else(|_| Vec::new());
 
-                let encrypted = match (b64url_decode(&n.subscription.keys.p256dh), b64url_decode(&n.subscription.keys.auth)) {
-                    (Some(user_pubkey), Some(auth_secret)) => {
-                        match encrypt_webpush_aes128gcm(&user_pubkey, &auth_secret, &payload_bytes) {
-                            Some((local_public_key, salt, cipher_text)) => Some(EncryptedData {
-                                localPublicKey: local_public_key,
-                                salt,
-                                cipherText: cipher_text,
-                            }),
-                            None => None,
-                        }
+        let start_ic = api::instruction_counter();
+        let mut result: Vec<EncryptedNotification> = Vec::with_capacity(50);
+
+        for n in st.notifications_queue.iter() {
+            let mut obj = serde_json::json!({
+                "title": n.body.title,
+                "body": n.body.content,
+            });
+            if let Some(url) = &n.body.url { obj["url"] = serde_json::Value::String(url.clone()); }
+            if let Some(tag) = &n.body.tag { obj["tag"] = serde_json::Value::String(tag.clone()); }
+            let payload_bytes = serde_json::to_vec(&obj).unwrap_or_else(|_| Vec::new());
+
+            let encrypted = match (b64url_decode(&n.subscription.keys.p256dh), b64url_decode(&n.subscription.keys.auth)) {
+                (Some(user_pubkey), Some(auth_secret)) => {
+                    match encrypt_webpush_aes128gcm(&user_pubkey, &auth_secret, &payload_bytes) {
+                        Some((local_public_key, salt, cipher_text)) => Some(EncryptedData {
+                            localPublicKey: local_public_key,
+                            salt,
+                            cipherText: cipher_text,
+                        }),
+                        None => None,
                     }
-                    _ => None,
-                };
-
-                EncryptedNotification {
-                    endpoint: n.subscription.endpoint.clone(),
-                    contentEncoding: ContentEncoding::Aes128Gcm,
-                    encrypted,
-                    context: n.context.clone(),
                 }
-            })
-            .collect()
+                _ => None,
+            };
+
+            result.push(EncryptedNotification {
+                endpoint: n.subscription.endpoint.clone(),
+                contentEncoding: ContentEncoding::Aes128Gcm,
+                encrypted,
+                context: n.context.clone(),
+            });
+
+            if result.len() >= 50 {
+                break;
+            }
+            let spent = api::instruction_counter().saturating_sub(start_ic);
+            if spent > 1_500_000_000u64 {
+                break;
+            }
+        }
+
+        result
     })
 }
 
