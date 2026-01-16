@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { Actor, HttpAgent } from '@dfinity/agent';
 import { Ed25519KeyIdentity } from '@dfinity/identity';
 import { Principal } from '@dfinity/principal';
-import { sendEncrypted } from './web-push-helper';
+import { EncryptedNotification, sendEncrypted } from './web-push-helper';
 
 export interface Env {
   IC_HOST: string;
@@ -71,24 +71,27 @@ async function sendWebPushBatch(actor: any, notifications: CanNotification[], en
   const tasks = notifications.map(async (n, i) => {
     let result;
     try {
-      const enc = n.encrypted[0]!;
       const ce = ('aes128gcm' in n.contentEncoding) ? 'aes128gcm' : 'aesgcm';
-      // For aes128gcm, http_ece body format is: salt (16) || rs (4, BE) || keyid_len (1=65) || dh (65) || ciphertext
-      const rs = Buffer.alloc(4);
-      rs.writeUInt32BE(4096, 0);
-      const keyIdLen = Buffer.from([65]);
+      let transformedNotification: EncryptedNotification = {
+        endpoint: n.endpoint,
+        contentEncoding: ce,
+      };
+      if (n.encrypted[0]) {
+        const enc = n.encrypted[0]!;
+        // For aes128gcm, http_ece body format is: salt (16) || rs (4, BE) || keyid_len (1=65) || dh (65) || ciphertext
+        const rs = Buffer.alloc(4);
+        rs.writeUInt32BE(4096, 0);
+        const keyIdLen = Buffer.from([65]);
+        transformedNotification.encrypted = {
+          localPublicKey: toBuffer(enc.localPublicKey),
+          salt: toBase64Url(enc.salt),
+          cipherText: ce === 'aes128gcm'
+            ? Buffer.concat([toBuffer(enc.salt), rs, keyIdLen, toBuffer(enc.localPublicKey), toBuffer(enc.cipherText)])
+            : toBuffer(enc.cipherText),
+        }
+      }
       result = await sendEncrypted(
-        {
-          endpoint: n.endpoint,
-          contentEncoding: ce,
-          encrypted: {
-            localPublicKey: toBuffer(enc.localPublicKey),
-            salt: toBase64Url(enc.salt),
-            cipherText: ce === 'aes128gcm'
-              ? Buffer.concat([toBuffer(enc.salt), rs, keyIdLen, toBuffer(enc.localPublicKey), toBuffer(enc.cipherText)])
-              : toBuffer(enc.cipherText),
-          },
-        },
+        transformedNotification,
         {
           TTL: 60 * 60, // 1 hour
           vapidDetails: {

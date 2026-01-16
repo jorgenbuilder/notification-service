@@ -38,7 +38,7 @@ const supportedUrgency: {
 
 type WebPushRequestDetails = RequestDetails & { agent?: Agent, timeout?: number, proxy?: any };
 
-export type EncryptedPayload = {
+export type EncryptedNotification = {
   endpoint: string;
   contentEncoding: ContentEncoding;
   encrypted?: {
@@ -49,7 +49,7 @@ export type EncryptedPayload = {
 }
 
 // basically original "sendNotification" function from web-push library with patched signature
-export async function sendEncrypted(payload: EncryptedPayload, options?: RequestOptions): Promise<SendResult> {
+export async function sendEncrypted(payload: EncryptedNotification, options?: RequestOptions): Promise<SendResult> {
   let requestDetails = await generateRequestDetails(payload, options);
   return new Promise(function (resolve, reject) {
     const httpsOptions: https.RequestOptions = {};
@@ -119,7 +119,7 @@ export async function sendEncrypted(payload: EncryptedPayload, options?: Request
 }
 
 // original function from web-push library with patched signature
-async function generateRequestDetails(payload: EncryptedPayload,
+async function generateRequestDetails(payload: EncryptedNotification,
                                       options?: RequestOptions): Promise<WebPushRequestDetails> {
   let currentGCMAPIKey = gcmAPIKey;
   let currentVapidDetails = vapidDetails;
