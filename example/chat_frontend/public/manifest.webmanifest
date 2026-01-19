@@ -1,4 +1,5 @@
 {
+  "id": "/canchat-app",
   "name": "canChat",
   "short_name": "canChat",
   "description": "Ephemeral chat with push notifications on the Internet Computer",
