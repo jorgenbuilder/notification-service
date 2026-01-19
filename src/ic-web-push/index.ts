@@ -318,6 +318,7 @@ export type IcWebPushPublicAPI = {
   getSubscription: typeof getSubscription;
   isSubscribed: typeof isSubscribed;
   setDebug: typeof setDebug;
+  setDebugAlerts: typeof setDebugAlerts;
 };
 
 const api: IcWebPushPublicAPI = {
@@ -332,6 +333,7 @@ const api: IcWebPushPublicAPI = {
   getSubscription,
   isSubscribed,
   setDebug,
+  setDebugAlerts,
 };
 
 export default api;
