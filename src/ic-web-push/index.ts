@@ -32,13 +32,23 @@ let _config: Required<Pick<IcWebPushConfig, 'agent' | 'notificationCanisterId' |
   Pick<IcWebPushConfig, 'applicationCanisterId'> = { ...DEFAULTS } as any;
 let _actor: any | null = null;
 let _debug = false;
+let _debugAlerts = false;
 
 function dbg(...args: any[]) {
-  if (_debug) console.log('[ic-web-push]', ...args);
+  if (_debug) {
+    console.log('[ic-web-push]', ...args);
+    if (_debugAlerts) {
+      alert('[ic-web-push] ' + args.map(x => JSON.stringify(x)).join(', '));
+    }
+  }
 }
 
 export function setDebug(enabled: boolean) {
   _debug = enabled;
+}
+
+export function setDebugAlerts(enabled: boolean) {
+  _debugAlerts = enabled;
 }
 
 export function init(config: IcWebPushConfig) {
@@ -106,7 +116,10 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
 export function ensurePushSupported(): boolean {
   requireWindow();
   const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
-  if (!supported) console.warn('[ic-web-push] Push is not supported in this browser.');
+  if (!supported) {
+    dbg('[ic-web-push] Push is not supported in this browser.');
+    console.warn('[ic-web-push] Push is not supported in this browser.');
+  }
   return supported;
 }
 
@@ -180,6 +193,7 @@ export async function isSubscribed(): Promise<boolean> {
         try {
           await sub.unsubscribe();
         } catch (e) {
+          dbg('[ic-web-push] Failed to unsubscribe local PushSubscription after remote mismatch:', e);
           console.warn('[ic-web-push] Failed to unsubscribe local PushSubscription after remote mismatch:', e);
         } finally {
           setLocalRegistered(null);
@@ -187,6 +201,7 @@ export async function isSubscribed(): Promise<boolean> {
         return false;
       }
     } catch (e) {
+      dbg('[ic-web-push] hasSubscription check failed; assuming local subscription is valid:', e);
       console.warn('[ic-web-push] hasSubscription check failed; assuming local subscription is valid:', e);
       // Fall through and trust local presence
     }
@@ -256,8 +271,10 @@ export async function unsubscribe(): Promise<void> {
     if (_config.applicationCanisterId) {
       const app = Principal.fromText(_config.applicationCanisterId);
       await actor.unsubscribe(app, sub.endpoint);
+      dbg('Subscription removed from canister. Endpoint: ', sub.endpoint);
     }
   } catch (e) {
+    dbg('[ic-web-push] Failed to unregister on canister (will still remove local sub):', e);
     console.warn('[ic-web-push] Failed to unregister on canister (will still remove local sub):', e);
   }
   try {
@@ -274,6 +291,7 @@ export async function unsubscribeAll(): Promise<void> {
   const actor = await getActor();
   const app = Principal.fromText(_config.applicationCanisterId);
   await actor.unsubscribeAll(app);
+  dbg('[ic-web-push] Removed all subscriptions from the canister');
   // keep local sub as-is; caller may also call unsubscribe()
 }
 

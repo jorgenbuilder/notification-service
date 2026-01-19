@@ -561,6 +561,7 @@ function App() {
                         setLocalNotifError('In order to get working push notifications on mobile, open this app as PWA');
                     } else {
                         icWebPush.setDebug(true);
+                        icWebPush.setDebugAlerts(true);
                         setIsNotifWorking(true);
                         icWebPush.init({
                             applicationCanisterId: chatCanisterId, agent, serviceWorkerPath: '/sw.js'
