@@ -35,8 +35,12 @@ const idlFactory = ({ IDL }: { IDL: typeof import('@dfinity/candid').IDL }) => {
     })),
     context: IDL.Tuple(IDL.Principal, IDL.Principal),
   });
+  const PeekPage = IDL.Record({
+    items: IDL.Vec(Notification),
+    drained: IDL.Bool,
+  });
   return IDL.Service({
-    peekQueue: IDL.Func([], [IDL.Vec(Notification)], ['query']),
+    peekQueue: IDL.Func([IDL.Nat64], [PeekPage], ['query']),
     popQueue: IDL.Func([IDL.Nat64], [], []),
     reportBrokenSubscriptions: IDL.Func(
       [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Principal, IDL.Text))],
@@ -165,12 +169,14 @@ async function runCycle(env: Env) {
       agent,
       canisterId: env.NOTIFICATION_CANISTER_ID,
     }) as unknown as {
-      peekQueue: () => Promise<CanNotification[]>;
+      peekQueue: (offset: bigint) => Promise<{ items: CanNotification[]; drained: boolean }>;
       popQueue: (amount: bigint) => Promise<void>;
     };
     try {
       log('Checking if queue is empty...');
-      const batch = await actor.peekQueue();
+      const page = await actor.peekQueue(0n);
+      const batch = page.items;
+      const isDrained = page.drained;
       if (batch.length > 0) {
         await sendWebPushBatch(actor, batch, env);
         log('Reporting sent notifications...');

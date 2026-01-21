@@ -1,4 +1,4 @@
-use candid::{Encode, Principal};
+use candid::{Encode, Decode, Principal};
 use pocket_ic::PocketIc;
 use std::collections::HashMap;
 
@@ -54,6 +54,9 @@ mod helpers {
     pub enum ContentEncoding { #[serde(rename="aesgcm")] AesGcm, #[serde(rename="aes128gcm")] Aes128Gcm }
     #[derive(CandidType, Deserialize, Debug, Clone)]
     pub struct EncryptedNotification { pub endpoint: String, pub contentEncoding: ContentEncoding, pub encrypted: Option<EncryptedData>, pub context: (Principal, Principal) }
+
+    #[derive(CandidType, Deserialize, Debug, Clone)]
+    pub struct PeekPage { pub items: Vec<EncryptedNotification>, pub drained: bool }
 
     pub fn principal(seed: u8) -> Principal { Principal::from_slice(&[seed; 29]) }
 
@@ -212,10 +215,10 @@ mod helpers {
                 .map(|_| ())
         }
 
-        pub fn peek(&self) -> Result<Vec<EncryptedNotification>, String> {
-            let bytes = super::call_query(&self.pic, self.canister_id, self.worker, "peekQueue", Encode!().unwrap())?;
-            let list: Vec<EncryptedNotification> = candid::decode_one(&bytes).unwrap_or_default();
-            Ok(list)
+        pub fn peek(&self, offset: u64) -> Result<(Vec<EncryptedNotification>, bool), String> {
+            let bytes = super::call_query(&self.pic, self.canister_id, self.worker, "peekQueue", Encode!(&offset).unwrap())?;
+            let page: PeekPage = Decode!(&bytes, PeekPage).map_err(|e| format!("Decode error: {}", e))?;
+            Ok((page.items, page.drained))
         }
 
         pub fn pop(&self, n: u64) -> Result<(), String> {
@@ -230,7 +233,6 @@ fn notifications_queue_basic_flow() {
     // Test environment with controller/worker/app_manager set up and app registered
     let env = h::TestEnv::new();
     let controller = env.controller();
-    let worker = env.worker();
     let app_manager = env.app_manager();
     let user1 = h::principal(0x04);
 
@@ -248,11 +250,11 @@ fn notifications_queue_basic_flow() {
     env.send(&vec![(user1, body)]).expect("sendNotifications failed");
 
     // Non-worker cannot peek
-    let res = call_query(&env.pic, env.canister_id, controller, "peekQueue", Encode!().unwrap());
+    let res = call_query(&env.pic, env.canister_id, controller, "peekQueue", Encode!(&0u64).unwrap());
     assert!(res.is_err(), "peekQueue by non-worker should reject");
 
     // Worker can peek; expect 2 items, FIFO order of endpoints
-    let list = env.peek().expect("worker peek");
+    let (list, _is_drained) = env.peek(0).expect("worker peek");
     assert_eq!(list.len(), 2, "expected two queued notifications");
     assert_eq!(list[0].endpoint, "https://push.example/ep-1");
     assert_eq!(list[1].endpoint, "https://push.example/ep-2");
@@ -270,7 +272,7 @@ fn notifications_queue_basic_flow() {
     // Pop one item; expect FIFO so remaining should be ep-2
     env.pop(1).expect("popQueue failed");
 
-    let list = env.peek().expect("peek after pop");
+    let (list, _is_drained) = env.peek(0).expect("peek after pop");
     assert_eq!(list.len(), 1, "expected one remaining after pop");
     assert_eq!(list[0].endpoint, "https://push.example/ep-2");
     // Decrypt and assert remaining item title/content
@@ -292,7 +294,7 @@ fn pop_more_than_queue_len_is_safe() {
     env.send(&vec![(user1, h::NotificationBody { title: "One".into(), content: "Item".into(), url: None, tag: None })]).expect("sendNotifications");
 
     // Peek once to assert title/content
-    let list_before = env.peek().expect("peek before pop");
+    let (list_before, _drained0) = env.peek(0).expect("peek before pop");
     assert_eq!(list_before.len(), 1, "expected one item queued");
     let payload = h::decrypt_payload(&list_before[0], &cred).expect("decrypt single item");
     assert_eq!(payload["title"], "One");
@@ -302,7 +304,7 @@ fn pop_more_than_queue_len_is_safe() {
     env.pop(10).expect("popQueue(10)");
 
     // Queue should be empty now
-    let list = env.peek().expect("peek by worker");
+    let (list, _d_after) = env.peek(0).expect("peek by worker");
     assert!(list.is_empty(), "queue should be empty after popping more than present");
 }
 
@@ -325,7 +327,7 @@ fn peek_then_push_then_pop_then_peek_no_skip_no_repeat() {
     env.send(&vec![(user1, h::NotificationBody { title: "T".into(), content: "C".into(), url: None, tag: None })]).expect("send batch1");
 
     // Peek after first push → expect 5 entries matching batch1 and title T
-    let list1 = env.peek().expect("peek after batch1");
+    let (list1, _d_a) = env.peek(0).expect("peek after batch1");
     assert_eq!(list1.len(), 5, "expected 5 notifications after first push");
     for (i, item) in list1.iter().enumerate() {
         assert_eq!(item.endpoint, batch1_eps[i], "batch1 endpoint order mismatch at index {}", i);
@@ -349,7 +351,7 @@ fn peek_then_push_then_pop_then_peek_no_skip_no_repeat() {
     env.pop(5).expect("pop first 5");
 
     // Peek again → 10 should remain (second send enqueued for all 10 subs), all with title T2
-    let list2 = env.peek().expect("peek after pop 5");
+    let (list2, _d_b) = env.peek(0).expect("peek after pop 5");
     assert_eq!(list2.len(), 10, "expected 10 remaining after popping first 5 (second send enqueues for all 10 subs)");
     for (i, item) in list2.iter().enumerate() {
         let expected = if i < 5 { &batch1_eps[i] } else { &batch2_eps[i - 5] };
@@ -363,7 +365,7 @@ fn peek_then_push_then_pop_then_peek_no_skip_no_repeat() {
 
     // Drain all remaining (10) and verify empty
     env.pop(10).expect("drain remaining");
-    let list3 = env.peek().expect("final peek");
+    let (list3, _d_final) = env.peek(0).expect("final peek");
     assert!(list3.is_empty(), "queue should be empty after draining remaining 10");
 }
 
@@ -390,7 +392,7 @@ fn single_subscription_many_notifications() {
     env.send(&batch1).expect("send batch1");
 
     // 2) peek -> expect 5 queued items for the single endpoint; assert titles N1..N5
-    let list1 = env.peek().expect("peek after batch1");
+    let (list1, _d1) = env.peek(0).expect("peek after batch1");
     assert_eq!(list1.len(), 5, "expected 5 notifications after first send");
     for (idx, item) in list1.iter().enumerate() {
         assert_eq!(item.endpoint, "https://push.example/single");
@@ -408,7 +410,7 @@ fn single_subscription_many_notifications() {
     env.pop(5).expect("pop first 5");
 
     // 5) peek again -> expect the remaining 5 (the second batch), no skip/no repeat; assert titles N6..N10
-    let list2 = env.peek().expect("peek after pop 5");
+    let (list2, _d2) = env.peek(0).expect("peek after pop 5");
     assert_eq!(list2.len(), 5, "expected 5 remaining after popping the first 5");
     for (i, item) in list2.iter().enumerate() {
         assert_eq!(item.endpoint, "https://push.example/single");
@@ -418,4 +420,79 @@ fn single_subscription_many_notifications() {
         assert_eq!(payload["title"], format!("N{}", n));
         assert_eq!(payload["body"], format!("Content {}", n));
     }
+}
+
+
+#[test]
+fn peek_queue_pagination_and_is_drained() {
+    use helpers as h;
+    let env = h::TestEnv::new();
+    let user = h::principal(0x44);
+
+    // Create 3 subscriptions to produce 3 queued notifications per send
+    let eps: Vec<String> = (1..=3).map(|i| format!("https://push.example/pag-{}", i)).collect();
+    for ep in &eps {
+        let (sub, _cred) = h::mk_valid_sub_with_creds(ep);
+        env.subscribe(user, &sub).expect("subscribe");
+    }
+    env.send(&vec![(user, h::NotificationBody { title: "P".into(), content: "G".into(), url: None, tag: None })]).expect("send");
+
+    // offset 0 -> 3 items, drained true
+    let (page0, drained0) = env.peek(0).expect("peek off 0");
+    assert_eq!(page0.len(), 3);
+    assert!(drained0);
+
+    // offset 1 -> 2 items, drained true
+    let (page1, drained1) = env.peek(1).expect("peek off 1");
+    assert_eq!(page1.len(), 2);
+    assert!(drained1);
+
+    // offset 2 -> 1 item, drained true
+    let (page2, drained2) = env.peek(2).expect("peek off 2");
+    assert_eq!(page2.len(), 1);
+    assert!(drained2);
+
+    // offset 3 -> 0 items, drained true (at end)
+    let (page3, drained3) = env.peek(3).expect("peek off 3");
+    assert!(page3.is_empty());
+    assert!(drained3);
+
+    // offset large -> 0 items, drained true
+    let (page_big, drained_big) = env.peek(10).expect("peek off 10");
+    assert!(page_big.is_empty());
+    assert!(drained_big);
+
+    // Now push many notifications so that total > 100, and verify first page is not drained
+    // We currently have 3 items in the queue (one send -> 3 subs). Each additional send adds 3.
+    // Keep sending until total exceeds 100.
+    let mut total = 3usize;
+    let mut i = 0usize;
+    while total <= 100 {
+        env.send(&vec![(user, h::NotificationBody { title: format!("P{}", i), content: "G".into(), url: None, tag: None })])
+            .expect("send more to exceed 100 total");
+        total += 3; // 3 subs per send
+        i += 1;
+    }
+
+    // Peek the first page and validate that when total > returned_len, is_drained is false.
+    let (first_page, drained_first) = env.peek(0).expect("peek first page after bulk push");
+    assert!(!first_page.is_empty(), "first page should return at least one item");
+    assert!(total > first_page.len(), "test setup expects total queued > first page size");
+    assert!(!drained_first, "is_drained must be false when more items remain beyond the first page");
+
+    // Continue paginating until drained; accumulate total seen and ensure it matches `total`.
+    let mut seen = first_page.len();
+    let mut offset = first_page.len() as u64;
+    let mut drained = drained_first;
+    let mut guard = 0; // safety to avoid infinite loops in case of a bug
+    while !drained {
+        let (page, d) = env.peek(offset).expect("peek subsequent page");
+        assert!(!page.is_empty(), "subsequent page should not be empty before drained");
+        seen += page.len();
+        offset += page.len() as u64;
+        drained = d;
+        guard += 1;
+        assert!(guard < 1000, "pagination loop guard tripped");
+    }
+    assert_eq!(seen, total, "paginated view should cover all queued items");
 }

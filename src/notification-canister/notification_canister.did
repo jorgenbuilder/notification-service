@@ -16,7 +16,7 @@ type NotificationBody = record {
   tag: opt text;
 };
 
-type Notification = record {
+type EncryptedNotification = record {
   endpoint: text;
   contentEncoding: variant { aesgcm; aes128gcm };
   encrypted: opt record {
@@ -46,7 +46,7 @@ service : (principal) -> {
   }) -> ();
 
   // worker interface
-  peekQueue: () -> (vec Notification) query;
+  peekQueue: (nat64) -> (record { items: vec EncryptedNotification; drained: bool }) query;
   popQueue: (nat64) -> ();
   reportBrokenSubscriptions: (vec record {
     application: principal;

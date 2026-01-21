@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use candid::export_service;
 use candid::{CandidType, Principal};
 use ic_cdk::api;
@@ -270,8 +272,14 @@ fn b64url_decode(input: &str) -> Option<Vec<u8>> {
     engine.decode(input.as_bytes()).ok()
 }
 
+#[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PeekPage {
+    pub items: Vec<EncryptedNotification>,
+    pub drained: bool,
+}
+
 #[query]
-fn peekQueue() -> Vec<EncryptedNotification> {
+fn peekQueue(offset: u64) -> PeekPage {
     let caller = api::caller();
     STATE.with(|s| {
         let st = s.borrow();
@@ -279,10 +287,13 @@ fn peekQueue() -> Vec<EncryptedNotification> {
             trap("Only worker can use this interface");
         }
 
-        let start_ic = api::instruction_counter();
-        let mut result: Vec<EncryptedNotification> = Vec::with_capacity(100);
+        let total_len = st.notifications_queue.len();
+        let start = core::cmp::min(offset as usize, total_len);
 
-        for n in st.notifications_queue.iter() {
+        let start_ic = api::instruction_counter();
+        let mut items: Vec<EncryptedNotification> = Vec::with_capacity(100);
+
+        for n in st.notifications_queue.iter().skip(start) {
             let mut obj = serde_json::json!({
                 "title": n.body.title,
                 "body": n.body.content,
@@ -305,19 +316,20 @@ fn peekQueue() -> Vec<EncryptedNotification> {
                 _ => None,
             };
 
-            result.push(EncryptedNotification {
+            items.push(EncryptedNotification {
                 endpoint: n.subscription.endpoint.clone(),
                 contentEncoding: ContentEncoding::Aes128Gcm,
                 encrypted,
                 context: n.context.clone(),
             });
 
-            if result.len() >= 100 || api::instruction_counter().saturating_sub(start_ic) > 2_000_000_000u64 {
+            if items.len() >= 100 || api::instruction_counter().saturating_sub(start_ic) > 2_000_000_000u64 {
                 break;
             }
         }
 
-        result
+        let drained = start + items.len() >= total_len;
+        PeekPage { items, drained }
     })
 }
 
