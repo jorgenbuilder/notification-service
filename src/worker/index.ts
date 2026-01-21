@@ -24,6 +24,11 @@ type CanNotification = {
   context: [Principal, Principal];
 }
 
+type NotificationCanisterActor = {
+  peekQueue: (offset: bigint) => Promise<{ items: CanNotification[]; drained: boolean }>;
+  popQueue: (amount: bigint) => Promise<void>;
+}
+
 const idlFactory = ({ IDL }: { IDL: typeof import('@dfinity/candid').IDL }) => {
   const Notification = IDL.Record({
     endpoint: IDL.Text,
@@ -55,6 +60,19 @@ const ts = () => new Date().toISOString();
 const log = (...args: any[]) => console.log(ts(), PREFIX, ...args);
 const warn = (...args: any[]) => console.warn(ts(), PREFIX, ...args);
 const err = (...args: any[]) => console.error(ts(), PREFIX, ...args);
+
+// we drain each 60 seconds
+let lastDrainedAt = Date.now();
+let paginationSkip = 0n;
+
+async function drainQueueMaybe(actor: NotificationCanisterActor, ignoreTimeout = false) {
+  if (paginationSkip == 0n) return;
+  if (!ignoreTimeout && Date.now() - lastDrainedAt < 60_000) return;
+  log('Draining queue...');
+  await actor.popQueue(BigInt(paginationSkip));
+  lastDrainedAt = Date.now();
+  paginationSkip = 0n;
+}
 
 function identityFromBase64Secret(b64: string): Ed25519KeyIdentity {
   const raw = Uint8Array.from(Buffer.from(String(b64).replace(/\s+/g, ''), 'base64'));
@@ -147,15 +165,15 @@ async function sendWebPushBatch(actor: any, notifications: CanNotification[], en
   if (fail > 0) warn('Some pushes failed. Sample error:', errors[0]);
 }
 
-async function runCycle(env: Env) {
+async function runCycle(env: Env): Promise<boolean> {
   try {
     if (!env.IC_HOST) {
       warn('IC_HOST is not set. The agent cannot connect.');
-      return;
+      return false;
     }
     if (!env.NOTIFICATION_CANISTER_ID) {
       warn('NOTIFICATION_CANISTER_ID is not set. Skipping cycle.');
-      return;
+      return false;
     }
     const identity = identityFromBase64Secret(env.WORKER_ED25519_SECRET_KEY);
     const agent = new HttpAgent({ host: env.IC_HOST, identity, fetch: (globalThis as any).fetch?.bind(globalThis) });
@@ -168,26 +186,24 @@ async function runCycle(env: Env) {
     const actor = Actor.createActor(idlFactory as any, {
       agent,
       canisterId: env.NOTIFICATION_CANISTER_ID,
-    }) as unknown as {
-      peekQueue: (offset: bigint) => Promise<{ items: CanNotification[]; drained: boolean }>;
-      popQueue: (amount: bigint) => Promise<void>;
-    };
+    }) as unknown as NotificationCanisterActor;
     try {
-      log('Checking if queue is empty...');
-      const page = await actor.peekQueue(0n);
+      log('Peeking queue, offset: ' + paginationSkip + '...');
+      const page = await actor.peekQueue(paginationSkip);
       const batch = page.items;
-      const isDrained = page.drained;
+      paginationSkip += BigInt(batch.length);
       if (batch.length > 0) {
         await sendWebPushBatch(actor, batch, env);
-        log('Reporting sent notifications...');
-        await actor.popQueue(BigInt(batch.length));
       }
+      await drainQueueMaybe(actor);
+      return !page.drained;
     } catch (e: any) {
       err('sub-iteration error:', e?.stack || String(e));
     }
   } catch (e: any) {
     err('runCycle() error:', e?.stack || String(e));
   }
+  return false;
 }
 
 function loadEnv(): Env {
@@ -215,13 +231,15 @@ function startScheduler(env: Env) {
 
   const tick = async () => {
     const start = Date.now();
+    let shouldRepeatImmediately = false;
     try {
-      await runCycle(env);
+      shouldRepeatImmediately = await runCycle(env);
     } catch (e) {
       err('scheduled run error', e);
     } finally {
-      const elapsed = Date.now() - start;
-      const delay = Math.max(0, CRON_MS - elapsed);
+      const delay = shouldRepeatImmediately
+        ? 0
+        : Math.max(0, start + CRON_MS - Date.now());
       scheduleNext(delay);
     }
   };
