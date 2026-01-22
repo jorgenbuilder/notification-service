@@ -35,10 +35,6 @@ service : (principal) -> {
   unsubscribe: (principal, text) -> ();
   unsubscribeAll: (principal) -> ();
 
-  // admin interface
-  registerApplication: (principal) -> ();
-  deregisterApplication: (principal) -> ();
-
   // app owner interface
   sendNotifications: (vec record {
     0: principal;

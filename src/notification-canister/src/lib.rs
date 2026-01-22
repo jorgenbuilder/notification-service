@@ -10,7 +10,8 @@ use std::collections::{BTreeMap, VecDeque};
 
 const MAX_QUEUE_SIZE: usize = 10_000;
 
-const VAPID_PUBLIC_KEY: &str = "BHwsFW3GXWkq7v0U_QM3yF43-4U8bjn0Nfdc3tl4BuX3CkzZv9T3df84QHB8PABj5m34y3YRByQfHgC_uHNFYQ4";
+const VAPID_PUBLIC_KEY: &str =
+    "BHwsFW3GXWkq7v0U_QM3yF43-4U8bjn0Nfdc3tl4BuX3CkzZv9T3df84QHB8PABj5m34y3YRByQfHgC_uHNFYQ4";
 
 #[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubscriptionKeys {
@@ -71,6 +72,13 @@ fn trap(msg: &str) -> ! {
     ic_cdk::trap(msg)
 }
 
+fn is_canister(p: &Principal) -> bool {
+    let bytes = p.as_slice();
+    // Motoko equivalent: size >= 0 and size <= 29 and last byte == 1
+    // Rust: ensure non-empty and <=29 and last byte == 1
+    !bytes.is_empty() && bytes.len() <= 29 && bytes[bytes.len() - 1] == 1u8
+}
+
 #[init]
 fn init(worker: Principal) {
     STATE.with(|s| {
@@ -126,13 +134,27 @@ fn subscribe(application: Principal, subscription: Subscription) {
     }
     STATE.with(|s| {
         let mut st = s.borrow_mut();
+        if !st.applications.contains_key(&application) {
+            if !is_canister(&application) {
+                trap("Only canister principals can be used as applications");
+            }
+            let app = Application {
+                manager: application,
+                subscriptions: BTreeMap::new(),
+            };
+            st.applications.insert(application, app);
+        }
+
         let app = st
             .applications
             .get_mut(&application)
             .unwrap_or_else(|| trap("Application not found"));
 
         let entry = app.subscriptions.entry(caller).or_insert_with(Vec::new);
-        if let Some(idx) = entry.iter().position(|sub| sub.endpoint == subscription.endpoint) {
+        if let Some(idx) = entry
+            .iter()
+            .position(|sub| sub.endpoint == subscription.endpoint)
+        {
             entry[idx] = subscription;
         } else {
             entry.push(subscription);
@@ -175,62 +197,27 @@ fn unsubscribeAll(application: Principal) {
     });
 }
 
-// Admin interface
-#[update]
-fn registerApplication(manager: Principal) {
-    let caller = api::caller();
-    if !api::is_controller(&caller) {
-        trap("Only controllers can register application");
-    }
-    STATE.with(|s| {
-        let mut st = s.borrow_mut();
-        if st.applications.contains_key(&manager) {
-            trap("Already registered");
-        }
-        let app = Application {
-            manager,
-            subscriptions: BTreeMap::new(),
-        };
-        st.applications.insert(manager, app);
-    });
-}
-
-#[update]
-fn deregisterApplication(manager: Principal) {
-    let caller = api::caller();
-    if !api::is_controller(&caller) {
-        trap("Only controllers can register application");
-    }
-    STATE.with(|s| {
-        let mut st = s.borrow_mut();
-        st.applications.remove(&manager);
-    });
-}
-
 // App owner interface
 #[update]
 async fn sendNotifications(arg: Vec<(Principal, NotificationBody)>) {
     let caller = api::caller();
     let prepared: Vec<Notification> = STATE.with(|s| {
         let st = s.borrow();
-        let app = st
-            .applications
-            .get(&caller)
-            .unwrap_or_else(|| trap("Caller does not have any application registered"));
+        let app = match st.applications.get(&caller) {
+            Some(app) => app,
+            None => return Vec::new(),
+        };
 
         let mut out: Vec<Notification> = Vec::new();
         for (user, body) in arg.iter() {
-            match app.subscriptions.get(user) {
-                Some(list) => {
-                    for subscription in list.iter() {
-                        out.push(Notification {
-                            subscription: subscription.clone(),
-                            body: body.clone(),
-                            context: (caller, *user),
-                        });
-                    }
+            if let Some(list) = app.subscriptions.get(user) {
+                for subscription in list.iter() {
+                    out.push(Notification {
+                        subscription: subscription.clone(),
+                        body: body.clone(),
+                        context: (caller, *user),
+                    });
                 }
-                None => {},
             }
         }
         out
@@ -242,10 +229,7 @@ async fn sendNotifications(arg: Vec<(Principal, NotificationBody)>) {
     let additions = prepared.len();
     let over_limit = STATE.with(|s| {
         let st = s.borrow();
-        st.notifications_queue
-            .len()
-            .saturating_add(additions)
-            > MAX_QUEUE_SIZE
+        st.notifications_queue.len().saturating_add(additions) > MAX_QUEUE_SIZE
     });
     if over_limit {
         trap("Notifications queue limit reached");
@@ -315,11 +299,18 @@ fn peekQueue(offset: u64) -> PeekPage {
                 "title": n.body.title,
                 "body": n.body.content,
             });
-            if let Some(url) = &n.body.url { obj["url"] = serde_json::Value::String(url.clone()); }
-            if let Some(tag) = &n.body.tag { obj["tag"] = serde_json::Value::String(tag.clone()); }
+            if let Some(url) = &n.body.url {
+                obj["url"] = serde_json::Value::String(url.clone());
+            }
+            if let Some(tag) = &n.body.tag {
+                obj["tag"] = serde_json::Value::String(tag.clone());
+            }
             let payload_bytes = serde_json::to_vec(&obj).unwrap_or_else(|_| Vec::new());
 
-            let encrypted = match (b64url_decode(&n.subscription.keys.p256dh), b64url_decode(&n.subscription.keys.auth)) {
+            let encrypted = match (
+                b64url_decode(&n.subscription.keys.p256dh),
+                b64url_decode(&n.subscription.keys.auth),
+            ) {
                 (Some(user_pubkey), Some(auth_secret)) => {
                     match encrypt_webpush_aes128gcm(&user_pubkey, &auth_secret, &payload_bytes) {
                         Some((local_public_key, salt, cipher_text)) => Some(EncryptedData {
@@ -340,7 +331,9 @@ fn peekQueue(offset: u64) -> PeekPage {
                 context: n.context.clone(),
             });
 
-            if items.len() >= 100 || api::instruction_counter().saturating_sub(start_ic) > 2_000_000_000u64 {
+            if items.len() >= 100
+                || api::instruction_counter().saturating_sub(start_ic) > 2_000_000_000u64
+            {
                 break;
             }
         }
@@ -350,15 +343,19 @@ fn peekQueue(offset: u64) -> PeekPage {
     })
 }
 
-fn encrypt_webpush_aes128gcm(user_public_key: &[u8], auth_secret: &[u8], payload: &[u8]) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+fn encrypt_webpush_aes128gcm(
+    user_public_key: &[u8],
+    auth_secret: &[u8],
+    payload: &[u8],
+) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     // Deterministic, query-safe Web Push AES-128-GCM per RFC 8291/8188.
     // No RNG used; all values derived from stable inputs via HKDF-SHA256.
-    use aes_gcm::Aes128Gcm;
     use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::Aes128Gcm;
     use aes_gcm::Nonce;
     use hkdf::Hkdf;
-    use p256::{PublicKey as P256PublicKey, SecretKey as P256SecretKey};
     use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use p256::{PublicKey as P256PublicKey, SecretKey as P256SecretKey};
     use sha2::{Digest, Sha256};
 
     // Validate inputs
@@ -377,7 +374,8 @@ fn encrypt_webpush_aes128gcm(user_public_key: &[u8], auth_secret: &[u8], payload
     };
 
     // Derive base HKDF from stable inputs
-    let mut hkdf_ikm = Vec::with_capacity(16 + user_public_key.len() + auth_secret.len() + payload_hash.len());
+    let mut hkdf_ikm =
+        Vec::with_capacity(16 + user_public_key.len() + auth_secret.len() + payload_hash.len());
     hkdf_ikm.extend_from_slice(b"ic-webpush-v1");
     hkdf_ikm.extend_from_slice(user_public_key);
     hkdf_ikm.extend_from_slice(auth_secret);
@@ -387,7 +385,9 @@ fn encrypt_webpush_aes128gcm(user_public_key: &[u8], auth_secret: &[u8], payload
 
     // Derive 16-byte salt (RFC 8188 salt)
     let mut salt = [0u8; 16];
-    if hk.expand(b"wp-salt", &mut salt).is_err() { return None; }
+    if hk.expand(b"wp-salt", &mut salt).is_err() {
+        return None;
+    }
 
     // Derive ephemeral secret key deterministically; ensure non-zero scalar
     let mut ctr: u32 = 0;
@@ -397,12 +397,16 @@ fn encrypt_webpush_aes128gcm(user_public_key: &[u8], auth_secret: &[u8], payload
         let mut info = Vec::with_capacity(32);
         info.extend_from_slice(b"wp-epk");
         info.extend_from_slice(&ctr.to_be_bytes());
-        if hk.expand(&info, &mut sk_bytes).is_err() { return None; }
+        if hk.expand(&info, &mut sk_bytes).is_err() {
+            return None;
+        }
         if let Ok(sk) = P256SecretKey::from_slice(&sk_bytes) {
             break sk;
         }
         ctr = ctr.wrapping_add(1);
-        if ctr == 0 { return None; }
+        if ctr == 0 {
+            return None;
+        }
     };
 
     // Ephemeral public key (server key)
@@ -431,7 +435,9 @@ fn encrypt_webpush_aes128gcm(user_public_key: &[u8], auth_secret: &[u8], payload
     // secret = HKDF-Expand(PRK_auth, context, 32)
     let hk_auth = Hkdf::<Sha256>::from_prk(prk_auth.as_ref()).ok()?;
     let mut secret32 = [0u8; 32];
-    if hk_auth.expand(&context, &mut secret32).is_err() { return None; }
+    if hk_auth.expand(&context, &mut secret32).is_err() {
+        return None;
+    }
 
     // prk = HKDF-Extract(salt, secret)
     let (prk, _salt2_unused) = Hkdf::<Sha256>::extract(Some(&salt), &secret32);
@@ -443,9 +449,13 @@ fn encrypt_webpush_aes128gcm(user_public_key: &[u8], auth_secret: &[u8], payload
 
     let hk_prk = Hkdf::<Sha256>::from_prk(prk.as_ref()).ok()?;
     let mut cek = [0u8; 16];
-    if hk_prk.expand(&key_info, &mut cek).is_err() { return None; }
+    if hk_prk.expand(&key_info, &mut cek).is_err() {
+        return None;
+    }
     let mut nonce = [0u8; 12];
-    if hk_prk.expand(&nonce_info, &mut nonce).is_err() { return None; }
+    if hk_prk.expand(&nonce_info, &mut nonce).is_err() {
+        return None;
+    }
 
     // aes128gcm plaintext framing: payload || 0x02 (last record)
     let mut plaintext = Vec::with_capacity(payload.len() + 1);
@@ -495,5 +505,3 @@ fn export_candid() -> String {
     export_service!();
     __export_service()
 }
-
-
