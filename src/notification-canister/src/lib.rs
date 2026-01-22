@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 
+const MAX_QUEUE_SIZE: usize = 10_000;
+
 const VAPID_PUBLIC_KEY: &str = "BHwsFW3GXWkq7v0U_QM3yF43-4U8bjn0Nfdc3tl4BuX3CkzZv9T3df84QHB8PABj5m34y3YRByQfHgC_uHNFYQ4";
 
 #[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
@@ -209,37 +211,52 @@ fn deregisterApplication(manager: Principal) {
 #[update]
 async fn sendNotifications(arg: Vec<(Principal, NotificationBody)>) {
     let caller = api::caller();
-    // Process each (user, body) in two phases to avoid overlapping borrows:
-    // 1) read-only borrow to fetch and clone user's subscriptions
-    // 2) mutable borrow to push notifications into the queue
-    for (user, body) in arg.into_iter() {
-        // Phase 1: read subscriptions immutably
-        let maybe_user_subs = STATE.with(|s| {
-            let st = s.borrow();
-            let app = match st.applications.get(&caller) {
-                Some(a) => a,
-                None => trap("Caller does not have any application registered"),
-            };
-            app.subscriptions.get(&user).cloned()
-        });
+    let prepared: Vec<Notification> = STATE.with(|s| {
+        let st = s.borrow();
+        let app = st
+            .applications
+            .get(&caller)
+            .unwrap_or_else(|| trap("Caller does not have any application registered"));
 
-        let user_subs = match maybe_user_subs {
-            Some(list) => list,
-            None => return, // replicate Motoko early return
-        };
-
-        // Phase 2: push notifications with a fresh mutable borrow
-        STATE.with(|s| {
-            let mut st = s.borrow_mut();
-            for subscription in user_subs.into_iter() {
-                st.notifications_queue.push_back(Notification {
-                    subscription,
-                    body: body.clone(),
-                    context: (caller, user),
-                });
+        let mut out: Vec<Notification> = Vec::new();
+        for (user, body) in arg.iter() {
+            match app.subscriptions.get(user) {
+                Some(list) => {
+                    for subscription in list.iter() {
+                        out.push(Notification {
+                            subscription: subscription.clone(),
+                            body: body.clone(),
+                            context: (caller, *user),
+                        });
+                    }
+                }
+                None => {},
             }
-        });
+        }
+        out
+    });
+    if prepared.is_empty() {
+        return;
     }
+
+    let additions = prepared.len();
+    let over_limit = STATE.with(|s| {
+        let st = s.borrow();
+        st.notifications_queue
+            .len()
+            .saturating_add(additions)
+            > MAX_QUEUE_SIZE
+    });
+    if over_limit {
+        trap("Notifications queue limit reached");
+    }
+
+    STATE.with(|s| {
+        let mut st = s.borrow_mut();
+        for n in prepared.into_iter() {
+            st.notifications_queue.push_back(n);
+        }
+    });
 }
 
 // Worker interface
