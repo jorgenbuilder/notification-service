@@ -27,6 +27,19 @@ type EncryptedNotification = record {
   context: record { principal; principal };
 };
 
+type HttpRequest = record {
+  method: text;
+  url: text;
+  headers: vec record { 0: text; 1: text };
+  body: blob;
+};
+
+type HttpResponse = record {
+  status_code: nat16;
+  headers: vec record { 0: text; 1: text };
+  body: blob;
+};
+
 service : (principal) -> {
   // end-user interface
   getVapidPublicKey: () -> (text) query;
@@ -49,4 +62,7 @@ service : (principal) -> {
     user: principal;
     endpoint: text;
   }) -> ();
+
+  // system interface
+  http_request: (HttpRequest) -> (HttpResponse) query;
 }

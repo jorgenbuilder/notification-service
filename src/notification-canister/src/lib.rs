@@ -7,6 +7,10 @@ use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
+use std::rc::Rc;
+
+mod promtracker;
+use promtracker::{CounterValue, PromTracker, StableData};
 
 const MAX_QUEUE_SIZE: usize = 10_000;
 
@@ -52,6 +56,7 @@ pub struct State {
     pub applications: BTreeMap<Principal, Application>,
     pub notifications_queue: VecDeque<Notification>,
     pub worker: Principal,
+    pub total_notifications_sent: u128,
 }
 
 impl Default for State {
@@ -60,12 +65,43 @@ impl Default for State {
             applications: BTreeMap::new(),
             notifications_queue: VecDeque::new(),
             worker: Principal::anonymous(),
+            total_notifications_sent: 0,
         }
     }
 }
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
+}
+
+struct PromHandler {
+    tracker: PromTracker,
+    users_counter: Rc<RefCell<CounterValue>>, // total number of subscribed users (per-app entries)
+    subscriptions_counter: Rc<RefCell<CounterValue>>, // total number of subscriptions (endpoints)
+}
+
+thread_local! {
+    static PROM: RefCell<Option<PromHandler>> = RefCell::new(None);
+}
+
+fn setup_prom() {
+    PROM.with(|p| {
+        let mut tracker = PromTracker::new("component=\"notification-canister\"");
+        tracker.add_system_metrics();
+        tracker.add_pull("total_notifications_sent", "", || {
+            STATE.with(|s| s.borrow().total_notifications_sent)
+        });
+        tracker.add_pull("applications_registered", "", || {
+            STATE.with(|s| s.borrow().applications.len() as u128)
+        });
+        let users_counter = tracker.add_counter("subscribed_users_total", "", true);
+        let subscriptions_counter = tracker.add_counter("subscriptions_total", "", true);
+        *p.borrow_mut() = Some(PromHandler {
+            tracker,
+            users_counter,
+            subscriptions_counter,
+        });
+    });
 }
 
 fn trap(msg: &str) -> ! {
@@ -85,22 +121,89 @@ fn init(worker: Principal) {
         let mut st = s.borrow_mut();
         st.worker = worker;
     });
+    setup_prom();
 }
 
 #[pre_upgrade]
 fn pre_upgrade() {
-    STATE.with(|s| {
-        let st = s.borrow().clone();
-        ic_cdk::storage::stable_save((st,)).expect("stable_save failed");
+    let st = STATE.with(|s| s.borrow().clone());
+    let stable_metrics: StableData = PROM.with(|p| {
+        if p.borrow().is_none() {
+            setup_prom();
+        }
+        p.borrow().as_ref().unwrap().tracker.share()
     });
+    ic_cdk::storage::stable_save((st, stable_metrics)).expect("stable_save failed");
 }
 
 #[post_upgrade]
 fn post_upgrade() {
-    let (st,): (State,) = ic_cdk::storage::stable_restore().expect("stable_restore failed");
+    let (st, stable_metrics): (State, StableData) =
+        ic_cdk::storage::stable_restore().expect("stable_restore failed");
     STATE.with(|s| {
         *s.borrow_mut() = st;
     });
+    setup_prom();
+    PROM.with(|p| {
+        if let Some(handles) = p.borrow_mut().as_mut() {
+            handles.tracker.unshare(stable_metrics);
+        }
+    });
+}
+
+#[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HttpRequest {
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+#[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HttpResponse {
+    pub status_code: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+fn render400() -> HttpResponse {
+    HttpResponse {
+        status_code: 400,
+        headers: vec![],
+        body: b"Invalid request".to_vec(),
+    }
+}
+
+fn render_plain_text(text: String) -> HttpResponse {
+    HttpResponse {
+        status_code: 200,
+        headers: vec![("content-type".to_string(), "text/plain".to_string())],
+        body: text.into_bytes(),
+    }
+}
+
+#[query]
+fn http_request(req: HttpRequest) -> HttpResponse {
+    // Normalize path (strip query)
+    let path = req.url.split('?').next().unwrap_or("");
+    match (req.method.as_str(), path) {
+        ("GET", "/metrics") => {
+            PROM.with(|p| {
+                if p.borrow().is_none() {
+                    setup_prom();
+                }
+            });
+            let full = api::id().to_text();
+            let short = full.split('-').next().unwrap_or(&full);
+            let canister_label = format!("canister=\"{}\"", short);
+            PROM.with(|p| {
+                let handles = p.borrow();
+                let tracker = &handles.as_ref().unwrap().tracker;
+                render_plain_text(tracker.render(&canister_label))
+            })
+        }
+        _ => render400(),
+    }
 }
 
 // End-user interface
@@ -150,6 +253,7 @@ fn subscribe(application: Principal, subscription: Subscription) {
             .get_mut(&application)
             .unwrap_or_else(|| trap("Application not found"));
 
+        let new_user = !app.subscriptions.contains_key(&caller);
         let entry = app.subscriptions.entry(caller).or_insert_with(Vec::new);
         if let Some(idx) = entry
             .iter()
@@ -158,16 +262,31 @@ fn subscribe(application: Principal, subscription: Subscription) {
             entry[idx] = subscription;
         } else {
             entry.push(subscription);
+            PROM.with(|p| {
+                if let Some(h) = p.borrow().as_ref() {
+                    h.subscriptions_counter.borrow_mut().add(1);
+                    if new_user {
+                        h.users_counter.borrow_mut().add(1);
+                    }
+                }
+            });
         }
     });
 }
 
-fn remove_subscription(app: &mut Application, user: Principal, endpoint: &str) {
+fn remove_subscription(app: &mut Application, user: Principal, endpoint: &str) -> (u128, bool) {
     if let Some(list) = app.subscriptions.get_mut(&user) {
+        let before = list.len();
         list.retain(|item| item.endpoint != endpoint);
-        if list.is_empty() {
+        let after = list.len();
+        let removed = (before.saturating_sub(after)) as u128;
+        let user_removed = after == 0 && before > 0;
+        if user_removed {
             app.subscriptions.remove(&user);
         }
+        (removed, user_removed)
+    } else {
+        (0, false)
     }
 }
 
@@ -180,7 +299,19 @@ fn unsubscribe(application: Principal, endpoint: String) {
             .applications
             .get_mut(&application)
             .unwrap_or_else(|| trap("Application not found"));
-        remove_subscription(app, caller, &endpoint);
+        let (removed, user_removed) = remove_subscription(app, caller, &endpoint);
+        if removed > 0 || user_removed {
+            PROM.with(|p| {
+                if let Some(h) = p.borrow().as_ref() {
+                    if removed > 0 {
+                        h.subscriptions_counter.borrow_mut().sub(removed);
+                    }
+                    if user_removed {
+                        h.users_counter.borrow_mut().sub(1);
+                    }
+                }
+            });
+        }
     });
 }
 
@@ -193,7 +324,19 @@ fn unsubscribeAll(application: Principal) {
             .applications
             .get_mut(&application)
             .unwrap_or_else(|| trap("Application not found"));
-        app.subscriptions.remove(&caller);
+        let removed = match app.subscriptions.get(&caller) {
+            Some(list) => list.len() as u128,
+            None => 0,
+        };
+        if removed > 0 {
+            app.subscriptions.remove(&caller);
+            PROM.with(|p| {
+                if let Some(h) = p.borrow().as_ref() {
+                    h.subscriptions_counter.borrow_mut().sub(removed);
+                    h.users_counter.borrow_mut().sub(1);
+                }
+            });
+        }
     });
 }
 
@@ -240,6 +383,9 @@ async fn sendNotifications(arg: Vec<(Principal, NotificationBody)>) {
         for n in prepared.into_iter() {
             st.notifications_queue.push_back(n);
         }
+        st.total_notifications_sent = st
+            .total_notifications_sent
+            .saturating_add(additions as u128);
     });
 }
 

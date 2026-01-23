@@ -15,12 +15,10 @@ This Rust canister powers the web‑push notification flow for applications runn
   - `subscribe(application, subscription)` / `unsubscribe` / `unsubscribeAll`
   - `hasSubscription(application, endpoint)`
   - `getVapidPublicKey()`
-- Admin (canister controllers only):
-  - `registerApplication(manager)` / `deregisterApplication(manager)`
 - Application owner (manager == caller):
   - `sendNotifications([(user, NotificationBody)])`
 - Worker (designated at init):
-  - `peekQueue() -> [EncryptedNotification]` (up to 100, FIFO)
+  - `peekQueue(offset) -> ([EncryptedNotification], isDrained)` (up to 100, FIFO)
   - `popQueue(amount)`
   - `reportBrokenSubscriptions([(application, user, endpoint)])`
 
