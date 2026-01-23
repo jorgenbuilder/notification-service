@@ -4,10 +4,12 @@ use candid::export_service;
 use candid::{CandidType, Principal};
 use ic_cdk::api;
 use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
+use ic_cdk_timers::set_timer;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
+use std::time::Duration;
 
 mod promtracker;
 use promtracker::{CounterValue, PromTracker, StableData};
@@ -57,6 +59,7 @@ pub struct State {
     pub notifications_queue: VecDeque<Notification>,
     pub worker: Principal,
     pub total_notifications_sent: u128,
+    pub startup_random: Option<Vec<u8>>,
 }
 
 impl Default for State {
@@ -66,6 +69,7 @@ impl Default for State {
             notifications_queue: VecDeque::new(),
             worker: Principal::anonymous(),
             total_notifications_sent: 0,
+            startup_random: None,
         }
     }
 }
@@ -115,13 +119,42 @@ fn is_canister(p: &Principal) -> bool {
     !bytes.is_empty() && bytes.len() <= 29 && bytes[bytes.len() - 1] == 1u8
 }
 
+// One-shot randomness fetch scheduled via timer after init/upgrade
+async fn fetch_startup_random_once() {
+    let rand_blob: Vec<u8> = match ic_cdk::api::call::call::<(), (Vec<u8>,)>(
+        Principal::management_canister(),
+        "raw_rand",
+        (),
+    )
+    .await
+    {
+        Ok((bytes,)) => bytes,
+        Err(_) => Vec::new(),
+    };
+
+    STATE.with(|s| {
+        let mut st = s.borrow_mut();
+        if st.startup_random.is_none() && !rand_blob.is_empty() {
+            st.startup_random = Some(rand_blob);
+        }
+    });
+}
+
 #[init]
 fn init(worker: Principal) {
     STATE.with(|s| {
         let mut st = s.borrow_mut();
         st.worker = worker;
+        if st.startup_random.is_none() {
+            st.startup_random = None;
+        }
     });
     setup_prom();
+    set_timer(Duration::ZERO, || {
+        ic_cdk::spawn(async {
+            fetch_startup_random_once().await;
+        });
+    });
 }
 
 #[pre_upgrade]
@@ -138,8 +171,13 @@ fn pre_upgrade() {
 
 #[post_upgrade]
 fn post_upgrade() {
-    let (st, stable_metrics): (State, StableData) =
+    let (mut st, stable_metrics): (State, StableData) =
         ic_cdk::storage::stable_restore().expect("stable_restore failed");
+
+    if st.startup_random.is_none() {
+        st.startup_random = None;
+    }
+
     STATE.with(|s| {
         *s.borrow_mut() = st;
     });
@@ -148,6 +186,13 @@ fn post_upgrade() {
         if let Some(handles) = p.borrow_mut().as_mut() {
             handles.tracker.unshare(stable_metrics);
         }
+    });
+
+    // Schedule a one-shot timer to fetch randomness after upgrade completes
+    set_timer(Duration::ZERO, || {
+        ic_cdk::spawn(async {
+            fetch_startup_random_once().await;
+        });
     });
 }
 
@@ -519,13 +564,27 @@ fn encrypt_webpush_aes128gcm(
         h.finalize().to_vec()
     };
 
-    // Derive base HKDF from stable inputs
-    let mut hkdf_ikm =
-        Vec::with_capacity(16 + user_public_key.len() + auth_secret.len() + payload_hash.len());
+    let (total_sent_be, startup_rand) = STATE.with(|s| {
+        let st = s.borrow();
+        (
+            st.total_notifications_sent.to_be_bytes(),
+            st.startup_random.clone().unwrap_or_default(),
+        )
+    });
+    // Derive base HKDF from stable inputs plus canister-scoped entropy and counters
+    let mut hkdf_ikm = Vec::with_capacity(
+        16 + user_public_key.len()
+            + auth_secret.len()
+            + payload_hash.len()
+            + 16
+            + startup_rand.len(),
+    );
     hkdf_ikm.extend_from_slice(b"ic-webpush-v1");
     hkdf_ikm.extend_from_slice(user_public_key);
     hkdf_ikm.extend_from_slice(auth_secret);
     hkdf_ikm.extend_from_slice(&payload_hash);
+    hkdf_ikm.extend_from_slice(&total_sent_be);
+    hkdf_ikm.extend_from_slice(&startup_rand);
 
     let hk = Hkdf::<Sha256>::new(None, &hkdf_ikm);
 
