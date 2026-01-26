@@ -70,6 +70,9 @@ function requireWindow(): Window {
 
 async function getActor() {
   if (_actor) return _actor;
+  if (!_config || !_config.agent) {
+    throw new Error('ic-web-push: init() must be called with an HttpAgent before use');
+  }
   const agent = _config.agent;
   const canisterId = _config.notificationCanisterId;
   const actor = Actor.createActor(notificationIdlFactory, {
@@ -114,7 +117,11 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
 }
 
 export function ensurePushSupported(): boolean {
-  requireWindow();
+  try {
+    requireWindow();
+  } catch {
+    return false;
+  }
   const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
   if (!supported) {
     dbg('[ic-web-push] Push is not supported in this browser.');
@@ -172,6 +179,12 @@ function setLocalRegistered(endpoint: string | null) {
 }
 
 export async function getSubscription(): Promise<PushSubscription | null> {
+  try {
+    requireWindow();
+  } catch {
+    return null; // SSR or non-browser environment
+  }
+  if (!('serviceWorker' in navigator)) return null;
   const reg = await navigator.serviceWorker.getRegistration(_config.serviceWorkerScope);
   if (!reg) return null;
   return reg.pushManager.getSubscription();

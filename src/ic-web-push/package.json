@@ -33,10 +33,10 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "typescript": "^5.4.0"
   },
   "devDependencies": {
-    "rimraf": "^5.0.5"
+    "rimraf": "^5.0.5",
+    "typescript": "^5.4.0"
   },
   "peerDependencies": {
     "@dfinity/agent": "^3.4.3",

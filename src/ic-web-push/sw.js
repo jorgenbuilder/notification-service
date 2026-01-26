@@ -23,16 +23,16 @@ self.addEventListener('push', (event) => {
         try {
             const data = event.data ? event.data.json() : {};
             const title = data.title || 'New notification';
-            const urlFromPayload = (data?.data?.url) || data?.url || '/';
+            const urlFromPayload = data?.url || (data?.data?.url) || '/';
             const options = {
-                body: data.body || 'You have a new message',
+                body: data.content || data.body || 'You have a new message',
                 icon: '/favicon.ico',
                 badge: '/favicon.ico',
                 data: {...(data.data || {}), url: urlFromPayload},
                 actions: data.actions || [],
                 requireInteraction: !!data.requireInteraction,
             };
-            let tag = data?.data?.tag || data?.tag;
+            let tag = data?.tag || data?.data?.tag;
             if (tag) {
                 options.tag = tag;
             }

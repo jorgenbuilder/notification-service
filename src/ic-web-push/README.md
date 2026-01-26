@@ -2,7 +2,7 @@
 
 IC Web Push is a tiny browser-side SDK that wires your web app to the Internet Computer (IC) notification canister to enable standards-based Web Push notifications.
 
-- Works with the standard Push API in Chromium, Firefox, Edge, and Android browsers.
+- Works with the standard Push API in Safari, Chromium, Firefox, Edge, and Android browsers.
 - Coexists with your existing service worker by using a separate scope.
 - Handles subscription, unsubscription, and application registration against the IC notification canister.
 
@@ -13,7 +13,7 @@ Default notification canister ID: `zjwxf-jyaaa-aaaao-a43ca-cai` (configurable).
 1. Your app registers a dedicated service worker (SW) under a separate scope (e.g., `/ic-web-push/`). This SW only handles displaying push notifications and reacting to clicks.
 2. The SDK asks the IC notification canister for its VAPID public key and subscribes the browser via `PushManager`.
 3. The resulting `PushSubscription` is sent to the notification canister and associated with your application canister principal.
-4. Your backend (or a canister) sends notifications to the notification canister, which delivers them to subscribed browsers via Web Push.
+4. Your backend canister sends notifications to the notification canister, which delivers them to subscribed browsers via Web Push.
 
 ## Files in this module
 
@@ -43,11 +43,15 @@ You can also customize the path/scope via `init()` if you prefer a different loc
 
 ```ts
 import icWebPush from 'ic-web-push';
+import { HttpAgent } from '@dfinity/agent';
+
+const agent = new HttpAgent({ host: 'https://ic0.app' });
+// If developing locally against a replica, you may need:
+// await agent.fetchRootKey();
 
 icWebPush.init({
-  // Host the canister on IC mainnet (default):
-  host: 'https://ic0.app',
-  // Notification canister ID (defaults to mainnet canister in this repo):
+  agent,
+  // Notification canister ID (defaults to mainnet id):
   // notificationCanisterId: 'zjwxf-jyaaa-aaaao-a43ca-cai',
   // Your application canister principal (REQUIRED to subscribe):
   applicationCanisterId: '<your app canister id>',
@@ -86,13 +90,6 @@ await icWebPush.unsubscribe();
 await icWebPush.unsubscribeAll();
 ```
 
-5) Optional app registration lifecycle on the canister:
-
-```ts
-await icWebPush.registerApplication();
-// ... when removing your app or cleaning up
-await icWebPush.deregisterApplication();
-```
 
 ## API reference
 
@@ -124,9 +121,9 @@ This SDK ships a dedicated service worker (`sw.js`) intended to live under its o
   - Calls `self.clients.claim()` to take control of pages under its scope without a manual reload.
 - `push`
   - Parses a JSON payload (if present). Robust to missing/invalid payloads and falls back to a generic notification.
-  - Supported payload fields (top-level or under `data`):
+  - Supported payload fields (top-level preferred; `data.*` also accepted for backward compatibility):
     - `title` (string): Notification title. Default: `"New notification"`.
-    - `body` (string): Notification body. Default: `"You have a new message"`.
+    - `content` (string): Notification text; mapped to Notification API `body`. Default: `"You have a new message"`.
     - `url` (string): A URL to open/focus when the notification is clicked. May also be provided as `data.url`.
     - `actions` (array): Standard Notification API actions.
     - `requireInteraction` (boolean): If `true`, the notification stays until user interaction.
@@ -135,14 +132,13 @@ This SDK ships a dedicated service worker (`sw.js`) intended to live under its o
   - Display options applied by default:
     - `icon` and `badge` default to `/favicon.ico` (override by editing `sw.js`).
     - If `tag` is provided, it is set on the notification so later notifications with the same tag replace or group, per browser behavior.
-  - Example payload sent by your backend/canister:
+  - Example payload sent by your canister (matches `NotificationBody`):
     ```json
     {
       "title": "New message",
-      "body": "You received a message",
-      "data": { "url": "/inbox/123", "tag": "chat-123" },
-      "actions": [{ "action": "open", "title": "Open" }],
-      "requireInteraction": true
+      "content": "You received a message",
+      "url": "/inbox/123",
+      "tag": "chat-123"
     }
     ```
 - `message`
@@ -213,9 +209,19 @@ export default function App() {
 
 ## Sending notifications
 
-From your canister or backend, call `sendNotification(principal, { title, content, url })` on the notification canister. The `principal` should be your application canister principal that was used when registering subscriptions.
+From your canister or backend, call `sendNotifications` with a vector of `(principal, NotificationBody)` pairs on the notification canister. The `principal` should be your application canister principal that was used when registering subscriptions.
 
-Refer to `declarations/notification_canister/notification_canister.did.js` for the full interface: `subscribe`, `unsubscribe`, `unsubscribeAll`, `sendNotification`, etc.
+`NotificationBody` schema:
+```candid
+record {
+  title: text;
+  content: text;
+  url: opt text;
+  tag: opt text;
+}
+```
+
+Refer to the canister Candid (`src/notification-canister/notification_canister.did`) for the full interface. On-chain sending uses `sendNotifications(principal, NotificationBody)`.
 
 ## Troubleshooting
 

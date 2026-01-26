@@ -16,6 +16,6 @@
   },
   "include": [
     "index.ts",
-    "notification_canister.did.js"
+    "declarations/**/*.js"
   ]
 }
