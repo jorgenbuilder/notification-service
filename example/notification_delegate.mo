@@ -10,7 +10,7 @@ module {
   };
 
   public type NotificationCanisterActor = actor {
-    sendNotifications : (arg : [(user : Principal, body : NotificationBody)]) -> async ();
+    sendNotifications : (arg : [(user : Principal, body : NotificationBody)]) -> async [Bool];
   };
 
   public func getActor() : NotificationCanisterActor = actor (NOTIFICATION_CANISTER_ID);

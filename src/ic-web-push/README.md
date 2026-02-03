@@ -11,9 +11,9 @@ Default notification canister ID: `zjwxf-jyaaa-aaaao-a43ca-cai` (configurable).
 ## High-level architecture
 
 1. Your app registers a dedicated service worker (SW) under a separate scope (e.g., `/ic-web-push/`). This SW only handles displaying push notifications and reacting to clicks.
-2. The SDK asks the IC notification canister for its VAPID public key and subscribes the browser via `PushManager`.
-3. The resulting `PushSubscription` is sent to the notification canister and associated with your application canister principal.
-4. Your backend canister sends notifications to the notification canister, which delivers them to subscribed browsers via Web Push.
+2. The SDK lists available relayers from the IC notification canister, picks one (random by default), fetches its VAPID public key, and subscribes the browser via `PushManager` using that key.
+3. The resulting `PushSubscription` plus the chosen relayer principal is sent to the notification canister and associated with your application canister principal.
+4. Your backend canister sends notifications to the notification canister; each subscription is routed to its chosen relayer's queue for delivery via Web Push.
 
 ## Files in this module
 
@@ -75,11 +75,20 @@ await icWebPush.registerServiceWorker();
 // One-shot convenience that registers SW, ensures permission, and subscribes
 await icWebPush.ensureSubscribed({ requestPermissionIfNeeded: true });
 
-// Or do it step-by-step
+// Or do it step-by-step and pick a relayer explicitly
 if (await icWebPush.getPermissionStatus() !== 'granted') {
   await icWebPush.requestPermission();
 }
-await icWebPush.subscribe();
+
+// Option A: pick a random relayer
+const relayer = await icWebPush.chooseRandomRelayer();
+if (!relayer) throw new Error('No relayers available');
+await icWebPush.subscribe({ relayer });
+
+// Option B: list relayers and choose one by your own policy
+const relayers = await icWebPush.listRelayers();
+// e.g., pick the first or prefer by description
+await icWebPush.subscribe({ relayer: relayers[0].relayer });
 ```
 
 4) Unsubscribe later (optional):

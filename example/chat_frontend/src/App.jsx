@@ -564,7 +564,7 @@ function App() {
                         // icWebPush.setDebugAlerts(true);
                         setIsNotifWorking(true);
                         icWebPush.init({
-                            applicationCanisterId: chatCanisterId, agent, serviceWorkerPath: '/sw.js'
+                            applicationCanisterId: chatCanisterId, agent
                         });
                         icWebPush.ensureSubscribed({requestPermissionIfNeeded: true})
                             .catch((err) => {

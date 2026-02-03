@@ -12,12 +12,11 @@ use std::rc::Rc;
 use std::time::Duration;
 
 mod promtracker;
+mod app_subscriptions;
 use promtracker::{CounterValue, PromTracker, StableData};
+pub use app_subscriptions::AppSubscriptions;
 
 const MAX_QUEUE_SIZE: usize = 10_000;
-
-const VAPID_PUBLIC_KEY: &str =
-    "BHwsFW3GXWkq7v0U_QM3yF43-4U8bjn0Nfdc3tl4BuX3CkzZv9T3df84QHB8PABj5m34y3YRByQfHgC_uHNFYQ4";
 
 #[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubscriptionKeys {
@@ -30,6 +29,7 @@ pub struct Subscription {
     pub endpoint: String,
     pub expirationTime: Option<u64>,
     pub keys: SubscriptionKeys,
+    pub relayer: Principal,
 }
 
 #[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
@@ -50,14 +50,23 @@ pub struct Notification {
 #[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Application {
     pub manager: Principal,
-    pub subscriptions: BTreeMap<Principal, Vec<Subscription>>, // user -> subscriptions
+    pub subscriptions: AppSubscriptions,
+}
+
+#[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelayerRecord {
+    pub queue: VecDeque<Notification>,
+    pub vapid_public_key: String,
+    pub registered_at: u64,
+    pub last_updated_at: u64,
+    pub description: String,
+    pub total_notifications_sent: u128,
 }
 
 #[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
 pub struct State {
     pub applications: BTreeMap<Principal, Application>,
-    pub notifications_queue: VecDeque<Notification>,
-    pub worker: Principal,
+    pub relayers: BTreeMap<Principal, RelayerRecord>,
     pub total_notifications_sent: u128,
     pub startup_random: Option<Vec<u8>>,
 }
@@ -66,8 +75,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             applications: BTreeMap::new(),
-            notifications_queue: VecDeque::new(),
-            worker: Principal::anonymous(),
+            relayers: BTreeMap::new(),
             total_notifications_sent: 0,
             startup_random: None,
         }
@@ -82,10 +90,62 @@ struct PromHandler {
     tracker: PromTracker,
     users_counter: Rc<RefCell<CounterValue>>, // total number of subscribed users (per-app entries)
     subscriptions_counter: Rc<RefCell<CounterValue>>, // total number of subscriptions (endpoints)
+    relayer_metric_ids: BTreeMap<Principal, Vec<usize>>, // per-relayer metric IDs registered in tracker
 }
 
 thread_local! {
     static PROM: RefCell<Option<PromHandler>> = RefCell::new(None);
+}
+
+fn add_relayer_metrics(relayer: Principal) {
+    PROM.with(|p| {
+        if p.borrow().is_none() {
+            setup_prom();
+        }
+        if let Some(h) = p.borrow_mut().as_mut() {
+            if h.relayer_metric_ids.contains_key(&relayer) {
+                return;
+            }
+            let label = format!("relayer=\"{}\"", relayer.to_text());
+            let id1 = h.tracker.add_pull("queue_len", &label, {
+                let relayer = relayer.clone();
+                move || {
+                    STATE.with(|s2| {
+                        s2.borrow()
+                            .relayers
+                            .get(&relayer)
+                            .map(|wr| wr.queue.len() as u128)
+                            .unwrap_or(0)
+                    })
+                }
+            });
+            let id2 = h.tracker.add_pull("notifications_sent", &label, {
+                let relayer = relayer.clone();
+                move || {
+                    STATE.with(|s2| {
+                        s2.borrow()
+                            .relayers
+                            .get(&relayer)
+                            .map(|wr| wr.total_notifications_sent)
+                            .unwrap_or(0)
+                    })
+                }
+            });
+            h.relayer_metric_ids.insert(relayer, vec![id1, id2]);
+        }
+    });
+}
+
+fn remove_relayer_metrics(relayer: Principal) {
+    PROM.with(|p| {
+        if let Some(h) = p.borrow_mut().as_mut() {
+            if let Some(ids) = h.relayer_metric_ids.remove(&relayer) {
+                for id in ids {
+                    h.tracker.remove(id);
+                }
+            }
+        }
+    });
 }
 
 fn setup_prom() {
@@ -98,12 +158,23 @@ fn setup_prom() {
         tracker.add_pull("applications_registered", "", || {
             STATE.with(|s| s.borrow().applications.len() as u128)
         });
+        tracker.add_pull("relayers_registered", "", || {
+            STATE.with(|s| s.borrow().relayers.len() as u128)
+        });
         let users_counter = tracker.add_counter("subscribed_users_total", "", true);
         let subscriptions_counter = tracker.add_counter("subscriptions_total", "", true);
-        *p.borrow_mut() = Some(PromHandler {
+        let handler = PromHandler {
             tracker,
             users_counter,
             subscriptions_counter,
+            relayer_metric_ids: BTreeMap::new(),
+        };
+        *p.borrow_mut() = Some(handler);
+        STATE.with(|s| {
+            let st = s.borrow();
+            for (wp, _) in st.relayers.iter() {
+                add_relayer_metrics(*wp);
+            }
         });
     });
 }
@@ -141,10 +212,9 @@ async fn fetch_startup_random_once() {
 }
 
 #[init]
-fn init(worker: Principal) {
+fn init() {
     STATE.with(|s| {
         let mut st = s.borrow_mut();
-        st.worker = worker;
         if st.startup_random.is_none() {
             st.startup_random = None;
         }
@@ -251,10 +321,103 @@ fn http_request(req: HttpRequest) -> HttpResponse {
     }
 }
 
+// Admin interface
+#[update]
+fn registerRelayer(relayer: Principal, vapid_public_key: String, description: String) {
+    let caller = api::caller();
+    if !api::is_controller(&caller) {
+        trap("Caller must be a canister controller");
+    }
+    let now = api::time();
+    STATE.with(|s| {
+        let mut st = s.borrow_mut();
+        if st.relayers.contains_key(&relayer) {
+            trap("Relayer already registered");
+        }
+        st.relayers.insert(
+            relayer,
+            RelayerRecord {
+                queue: VecDeque::new(),
+                vapid_public_key: vapid_public_key.clone(),
+                registered_at: now,
+                last_updated_at: now,
+                description: description.clone(),
+                total_notifications_sent: 0,
+            },
+        );
+    });
+    add_relayer_metrics(relayer);
+}
+
+#[update]
+fn deregisterRelayer(relayer: Principal) {
+    let caller = api::caller();
+    if !api::is_controller(&caller) {
+        trap("Caller must be a canister controller");
+    }
+    remove_relayer_metrics(relayer);
+        let (subs_removed_total, users_removed_total) = STATE.with(|s| {
+        let mut st = s.borrow_mut();
+        if !st.relayers.contains_key(&relayer) {
+            trap("Relayer not registered");
+        }
+
+        let mut subs_removed: u128 = 0;
+        let mut users_removed: u128 = 0;
+        for (_app_id, app) in st.applications.iter_mut() {
+            let (srm, urm) = app.subscriptions.remove_all_by_relayer(relayer);
+            if srm > 0 {
+                subs_removed = subs_removed.saturating_add(srm);
+            }
+            if urm > 0 {
+                users_removed = users_removed.saturating_add(urm);
+            }
+        }
+        st.relayers.remove(&relayer);
+
+        (subs_removed, users_removed)
+    });
+    if subs_removed_total > 0 || users_removed_total > 0 {
+        PROM.with(|p| {
+            if let Some(h) = p.borrow().as_ref() {
+                if subs_removed_total > 0 {
+                    h.subscriptions_counter.borrow_mut().sub(subs_removed_total);
+                }
+                if users_removed_total > 0 {
+                    h.users_counter.borrow_mut().sub(users_removed_total);
+                }
+            }
+        });
+    }
+}
+
 // End-user interface
 #[query]
-fn getVapidPublicKey() -> String {
-    VAPID_PUBLIC_KEY.to_string()
+fn getVapidPublicKey(relayer: Principal) -> String {
+    STATE.with(|s| {
+        let st = s.borrow();
+        match st.relayers.get(&relayer) {
+            Some(wr) => wr.vapid_public_key.clone(),
+            None => trap("Relayer not registered"),
+        }
+    })
+}
+
+#[query]
+fn listRelayers() -> Vec<RelayerInfo> {
+    STATE.with(|s| {
+        let st = s.borrow();
+        st.relayers
+            .iter()
+            .map(|(wp, wr)| RelayerInfo {
+                relayer: *wp,
+                vapid_public_key: wr.vapid_public_key.clone(),
+                registeredAt: wr.registered_at,
+                lastUpdatedAt: wr.last_updated_at,
+                description: wr.description.clone(),
+            })
+            .collect()
+    })
 }
 
 #[query]
@@ -266,11 +429,7 @@ fn hasSubscription(application: Principal, endpoint: String) -> bool {
             .applications
             .get(&application)
             .unwrap_or_else(|| trap("Application not found"));
-        if let Some(list) = app.subscriptions.get(&caller) {
-            list.iter().any(|sub| sub.endpoint == endpoint)
-        } else {
-            false
-        }
+        app.subscriptions.has_endpoint(&caller, &endpoint)
     })
 }
 
@@ -288,63 +447,41 @@ fn subscribe(application: Principal, subscription: Subscription) {
             }
             let app = Application {
                 manager: application,
-                subscriptions: BTreeMap::new(),
+                subscriptions: AppSubscriptions::new(),
             };
             st.applications.insert(application, app);
         }
-
-        let app = st
-            .applications
-            .get_mut(&application)
-            .unwrap_or_else(|| trap("Application not found"));
-
-        let new_user = !app.subscriptions.contains_key(&caller);
-        let entry = app.subscriptions.entry(caller).or_insert_with(Vec::new);
-        if let Some(idx) = entry
-            .iter()
-            .position(|sub| sub.endpoint == subscription.endpoint)
-        {
-            entry[idx] = subscription;
-        } else {
-            entry.push(subscription);
+        let (subs_added, _subs_removed, user_added, _user_removed) = {
+            let app = st
+                .applications
+                .get_mut(&application)
+                .unwrap_or_else(|| trap("Application not found"));
+            app.subscriptions.add(caller, subscription.clone())
+        };
+        if subs_added > 0 || user_added {
             PROM.with(|p| {
                 if let Some(h) = p.borrow().as_ref() {
-                    h.subscriptions_counter.borrow_mut().add(1);
-                    if new_user {
-                        h.users_counter.borrow_mut().add(1);
-                    }
+                    if subs_added > 0 { h.subscriptions_counter.borrow_mut().add(subs_added); }
+                    if user_added { h.users_counter.borrow_mut().add(1); }
                 }
             });
         }
     });
 }
 
-fn remove_subscription(app: &mut Application, user: Principal, endpoint: &str) -> (u128, bool) {
-    if let Some(list) = app.subscriptions.get_mut(&user) {
-        let before = list.len();
-        list.retain(|item| item.endpoint != endpoint);
-        let after = list.len();
-        let removed = (before.saturating_sub(after)) as u128;
-        let user_removed = after == 0 && before > 0;
-        if user_removed {
-            app.subscriptions.remove(&user);
-        }
-        (removed, user_removed)
-    } else {
-        (0, false)
-    }
-}
 
 #[update]
 fn unsubscribe(application: Principal, endpoint: String) {
     let caller = api::caller();
     STATE.with(|s| {
         let mut st = s.borrow_mut();
-        let app = st
-            .applications
-            .get_mut(&application)
-            .unwrap_or_else(|| trap("Application not found"));
-        let (removed, user_removed) = remove_subscription(app, caller, &endpoint);
+        let (removed, user_removed) = {
+            let app = st
+                .applications
+                .get_mut(&application)
+                .unwrap_or_else(|| trap("Application not found"));
+            app.subscriptions.remove_endpoint(caller, &endpoint)
+        };
         if removed > 0 || user_removed {
             PROM.with(|p| {
                 if let Some(h) = p.borrow().as_ref() {
@@ -365,20 +502,18 @@ fn unsubscribeAll(application: Principal) {
     let caller = api::caller();
     STATE.with(|s| {
         let mut st = s.borrow_mut();
-        let app = st
-            .applications
-            .get_mut(&application)
-            .unwrap_or_else(|| trap("Application not found"));
-        let removed = match app.subscriptions.get(&caller) {
-            Some(list) => list.len() as u128,
-            None => 0,
+        let (removed, user_removed) = {
+            let app = st
+                .applications
+                .get_mut(&application)
+                .unwrap_or_else(|| trap("Application not found"));
+            app.subscriptions.remove_all_by_user(caller)
         };
-        if removed > 0 {
-            app.subscriptions.remove(&caller);
+        if removed > 0 || user_removed {
             PROM.with(|p| {
                 if let Some(h) = p.borrow().as_ref() {
-                    h.subscriptions_counter.borrow_mut().sub(removed);
-                    h.users_counter.borrow_mut().sub(1);
+                    if removed > 0 { h.subscriptions_counter.borrow_mut().sub(removed); }
+                    if user_removed { h.users_counter.borrow_mut().sub(1); }
                 }
             });
         }
@@ -387,54 +522,81 @@ fn unsubscribeAll(application: Principal) {
 
 // App owner interface
 #[update]
-async fn sendNotifications(arg: Vec<(Principal, NotificationBody)>) {
+async fn sendNotifications(arg: Vec<(Principal, NotificationBody)>) -> Vec<bool> {
     let caller = api::caller();
-    let prepared: Vec<Notification> = STATE.with(|s| {
-        let st = s.borrow();
-        let app = match st.applications.get(&caller) {
-            Some(app) => app,
-            None => return Vec::new(),
-        };
+    let arg_len = arg.len();
 
-        let mut out: Vec<Notification> = Vec::new();
-        for (user, body) in arg.iter() {
-            if let Some(list) = app.subscriptions.get(user) {
-                for subscription in list.iter() {
-                    out.push(Notification {
-                        subscription: subscription.clone(),
-                        body: body.clone(),
-                        context: (caller, *user),
-                    });
+    // Snapshot the per-input subscriptions; also detect if application exists
+    let (app_exists, per_input_subs): (
+        bool,
+        Vec<(Principal, NotificationBody, Vec<Subscription>)>,
+    ) = STATE.with(|s| {
+        let st = s.borrow();
+        match st.applications.get(&caller) {
+            None => (false, Vec::new()),
+            Some(app) => {
+                let mut out: Vec<(Principal, NotificationBody, Vec<Subscription>)> =
+                    Vec::with_capacity(arg_len);
+                for (user, body) in arg.iter() {
+                    let subs = app.subscriptions.get_user_subs(user);
+                    out.push((*user, body.clone(), subs));
                 }
+                (true, out)
             }
         }
-        out
     });
-    if prepared.is_empty() {
-        return;
+
+    if !app_exists {
+        trap("Application not found");
     }
 
-    let additions = prepared.len();
-    let over_limit = STATE.with(|s| {
-        let st = s.borrow();
-        st.notifications_queue.len().saturating_add(additions) > MAX_QUEUE_SIZE
-    });
-    if over_limit {
-        trap("Notifications queue limit reached");
-    }
+    let mut results: Vec<bool> = Vec::with_capacity(per_input_subs.len());
 
     STATE.with(|s| {
         let mut st = s.borrow_mut();
-        for n in prepared.into_iter() {
-            st.notifications_queue.push_back(n);
+        for (user, body, subs) in per_input_subs.into_iter() {
+            let mut any_enqueued = false;
+            if subs.is_empty() {
+                results.push(false);
+                continue;
+            }
+            for subscription in subs.into_iter() {
+                // Skip if relayer is not registered
+                if let Some(wr) = st.relayers.get_mut(&subscription.relayer) {
+                    if wr.queue.len() < MAX_QUEUE_SIZE {
+                        // Enqueue
+                        wr.queue.push_back(Notification {
+                            subscription: subscription.clone(),
+                            body: body.clone(),
+                            context: (caller, user),
+                        });
+                        wr.total_notifications_sent = wr.total_notifications_sent.saturating_add(1);
+                        st.total_notifications_sent = st.total_notifications_sent.saturating_add(1);
+                        any_enqueued = true;
+                    } else {
+                        // Queue full for this relayer; skip this subscription
+                    }
+                } else {
+                    // Can never happen: relayer not registered
+                }
+            }
+            results.push(any_enqueued);
         }
-        st.total_notifications_sent = st
-            .total_notifications_sent
-            .saturating_add(additions as u128);
     });
+
+    results
 }
 
-// Worker interface
+#[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelayerInfo {
+    pub relayer: Principal,
+    pub vapid_public_key: String,
+    pub registeredAt: u64,
+    pub lastUpdatedAt: u64,
+    pub description: String,
+}
+
+// Relayer interface
 #[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EncryptedData {
     pub localPublicKey: Vec<u8>,
@@ -470,31 +632,51 @@ pub struct PeekPage {
     pub drained: bool,
 }
 
+#[update]
+fn updateRelayer(vapid_public_key: String, description: String) {
+    let caller = api::caller();
+    STATE.with(|s| {
+        let mut st = s.borrow_mut();
+        let wr = st
+            .relayers
+            .get_mut(&caller)
+            .unwrap_or_else(|| trap("Relayer not registered"));
+        wr.vapid_public_key = vapid_public_key;
+        wr.description = description;
+        wr.last_updated_at = api::time();
+    });
+}
+
 #[query]
 fn peekQueue(offset: u64) -> PeekPage {
     let caller = api::caller();
     STATE.with(|s| {
         let st = s.borrow();
-        if caller != st.worker {
-            trap("Only worker can use this interface");
-        }
+        let wr = st
+            .relayers
+            .get(&caller)
+            .unwrap_or_else(|| trap("Relayer not registered"));
 
-        let total_len = st.notifications_queue.len();
+        let total_len = wr.queue.len();
         let start = core::cmp::min(offset as usize, total_len);
 
         let start_ic = api::instruction_counter();
         let mut items: Vec<EncryptedNotification> = Vec::with_capacity(100);
 
-        for n in st.notifications_queue.iter().skip(start) {
+        for n in wr.queue.iter().skip(start) {
             let mut obj = serde_json::json!({
                 "title": n.body.title,
                 "body": n.body.content,
             });
             if let Some(url) = &n.body.url {
-                obj["url"] = serde_json::Value::String(url.clone());
+                if let Some(map) = obj.as_object_mut() {
+                    map.insert("url".to_string(), serde_json::Value::String(url.clone()));
+                }
             }
             if let Some(tag) = &n.body.tag {
-                obj["tag"] = serde_json::Value::String(tag.clone());
+                if let Some(map) = obj.as_object_mut() {
+                    map.insert("tag".to_string(), serde_json::Value::String(tag.clone()));
+                }
             }
             let payload_bytes = serde_json::to_vec(&obj).unwrap_or_else(|_| Vec::new());
 
@@ -679,11 +861,13 @@ async fn popQueue(amount: u64) {
     let caller = api::caller();
     STATE.with(|s| {
         let mut st = s.borrow_mut();
-        if caller != st.worker {
-            trap("Only worker can use this interface");
-        }
-        for _ in 0..amount {
-            st.notifications_queue.pop_front();
+        let wr = st
+            .relayers
+            .get_mut(&caller)
+            .unwrap_or_else(|| trap("Relayer not registered"));
+        let amt = core::cmp::min(amount as usize, wr.queue.len());
+        for _ in 0..amt {
+            wr.queue.pop_front();
         }
     });
 }
@@ -693,12 +877,25 @@ async fn reportBrokenSubscriptions(arg: Vec<(Principal, Principal, String)>) {
     let caller = api::caller();
     STATE.with(|s| {
         let mut st = s.borrow_mut();
-        if caller != st.worker {
-            trap("Only worker can use this interface");
-        }
         for (application, user, endpoint) in arg.into_iter() {
-            if let Some(app) = st.applications.get_mut(&application) {
-                remove_subscription(app, user, &endpoint);
+            let (removed, user_removed) = {
+                let app = st
+                    .applications
+                    .get_mut(&application)
+                    .unwrap_or_else(|| trap("Application not found"));
+                app.subscriptions.remove_endpoint_by_relayer(user, &endpoint, &caller)
+            };
+            if removed > 0 || user_removed {
+                PROM.with(|p| {
+                    if let Some(h) = p.borrow().as_ref() {
+                        if removed > 0 {
+                            h.subscriptions_counter.borrow_mut().sub(removed);
+                        }
+                        if user_removed {
+                            h.users_counter.borrow_mut().sub(1);
+                        }
+                    }
+                });
             }
         }
     });

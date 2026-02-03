@@ -1,7 +1,7 @@
 {
-  "name": "worker",
+  "name": "relayer",
   "version": "1.0.0",
-  "description": "Notification Node worker (mirrors Cloudflare worker)",
+  "description": "Notification Node relayer",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",

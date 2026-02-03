@@ -2,7 +2,6 @@
   "canisters": {
     "notification_canister": {
       "package": "notification-canister",
-      "init_arg": "(principal \"4b6ay-oaus3-ltwc2-bvn3j-d4are-fzvok-6hwea-p2tdb-2hbki-b5ruh-uae\")",
       "type": "rust",
       "candid": "src/notification-canister/notification_canister.did",
       "declarations": {

@@ -20,6 +20,8 @@ export type IcWebPushConfig = {
 export type SubscribeOptions = {
   // If true, will prompt for notification permission if not already granted.
   requestPermissionIfNeeded?: boolean;
+  // Optionally force using a specific relayer (Principal text or Principal)
+  relayer?: string | Principal;
 };
 
 const DEFAULTS = {
@@ -141,14 +143,38 @@ function urlBase64ToUint8Array(base64String: string): Uint8Array {
   return outputArray;
 }
 
-async function getVapidPublicKey(): Promise<string> {
+function toPrincipal(p: string | Principal): Principal {
+  return typeof p === 'string' ? Principal.fromText(p) : p;
+}
+
+export type RelayerInfo = {
+  relayer: Principal;
+  vapid_public_key: string;
+  registeredAt: bigint;
+  lastUpdatedAt: bigint;
+  description: string;
+};
+
+export async function listRelayers(): Promise<RelayerInfo[]> {
   const actor = await getActor();
-  const key: string = await actor.getVapidPublicKey();
-  dbg('VAPID public key fetched');
+  return actor.listRelayers();
+}
+
+export async function chooseRandomRelayer(): Promise<Principal | null> {
+  const list = await listRelayers();
+  if (!list || list.length === 0) return null;
+  const idx = Math.floor(Math.random() * list.length);
+  return list[idx].relayer;
+}
+
+export async function getVapidPublicKey(relayer: string | Principal): Promise<string> {
+  const actor = await getActor();
+  const key: string = await actor.getVapidPublicKey(toPrincipal(relayer));
+  dbg('VAPID public key fetched for relayer');
   return key;
 }
 
-function subscriptionToRecord(sub: PushSubscription): any {
+function subscriptionToRecord(sub: PushSubscription, relayer: Principal): any {
   const json = sub.toJSON();
   return {
     endpoint: sub.endpoint,
@@ -157,12 +183,14 @@ function subscriptionToRecord(sub: PushSubscription): any {
       auth: (json.keys as any)?.auth ?? '',
     },
     expirationTime: json.expirationTime ? [BigInt(json.expirationTime)] : [],
+    relayer,
   };
 }
 
 const LS = {
   registered: 'icwp.registered',
   endpoint: 'icwp.endpoint',
+  relayer: 'icwp.relayer',
 };
 
 function setLocalRegistered(endpoint: string | null) {
@@ -193,6 +221,20 @@ export async function getSubscription(): Promise<PushSubscription | null> {
 export async function isSubscribed(): Promise<boolean> {
   const sub = await getSubscription();
   if (!sub) return false;
+
+  // Best-effort relayer consistency check: if we stored a relayer locally, ensure it's still registered.
+  try {
+    const storedRelayerTxt = localStorage.getItem(LS.relayer);
+    if (storedRelayerTxt) {
+      const relayers = await listRelayers();
+      const exists = relayers.some(r => r.relayer.toText() === storedRelayerTxt);
+      if (!exists) {
+        dbg('[ic-web-push] Stored relayer is no longer registered. Treating as unsubscribed.');
+        return false;
+      }
+    }
+  } catch {
+  }
 
   // If applicationCanisterId is configured, verify with server canister.
   if (_config.applicationCanisterId) {
@@ -247,9 +289,26 @@ export async function subscribe(options?: SubscribeOptions): Promise<PushSubscri
     }
   }
 
+  // Resolve relayer to use
+  let relayer: Principal | null = null;
+  try {
+    if (options?.relayer) relayer = toPrincipal(options.relayer);
+    else {
+      const stored = localStorage.getItem(LS.relayer);
+      if (stored) relayer = Principal.fromText(stored);
+    }
+  } catch {
+  }
+  if (!relayer) {
+    relayer = await chooseRandomRelayer();
+  }
+  if (!relayer) {
+    throw new Error('ic-web-push: No relayers are registered on the notification canister');
+  }
+
   const reg = await ensureServiceWorkerReady();
   const existing = await reg.pushManager.getSubscription();
-  const vapidKey = await getVapidPublicKey();
+  const vapidKey = await getVapidPublicKey(relayer);
   const appServerKey = urlBase64ToUint8Array(vapidKey);
 
   let subscription = existing;
@@ -265,9 +324,13 @@ export async function subscribe(options?: SubscribeOptions): Promise<PushSubscri
 
   const actor = await getActor();
   const app = Principal.fromText(_config.applicationCanisterId!);
-  await actor.subscribe(app, subscriptionToRecord(subscription));
+  await actor.subscribe(app, subscriptionToRecord(subscription, relayer));
   setLocalRegistered(subscription.endpoint);
-  dbg('Subscription registered on canister');
+  try {
+    localStorage.setItem(LS.relayer, relayer.toText());
+  } catch {
+  }
+  dbg('Subscription registered on canister with relayer', relayer.toText());
   return subscription;
 }
 
@@ -324,6 +387,11 @@ export type IcWebPushPublicAPI = {
   registerServiceWorker: typeof registerServiceWorker;
   requestPermission: typeof requestPermission;
   getPermissionStatus: typeof getPermissionStatus;
+  // Relayers
+  listRelayers: typeof listRelayers;
+  chooseRandomRelayer: typeof chooseRandomRelayer;
+  getVapidPublicKey: typeof getVapidPublicKey;
+  // Subs
   subscribe: typeof subscribe;
   unsubscribe: typeof unsubscribe;
   unsubscribeAll: typeof unsubscribeAll;
@@ -339,6 +407,11 @@ const api: IcWebPushPublicAPI = {
   registerServiceWorker,
   requestPermission,
   getPermissionStatus,
+  // Relayers
+  listRelayers,
+  chooseRandomRelayer,
+  getVapidPublicKey,
+  // Subs
   subscribe,
   unsubscribe,
   unsubscribeAll,

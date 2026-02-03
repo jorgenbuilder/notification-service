@@ -2,21 +2,33 @@ import type { Principal } from '@dfinity/principal';
 import type { ActorMethod } from '@dfinity/agent';
 import type { IDL } from '@dfinity/candid';
 
-export interface NotificationCanister {
-  'getVapidPublicKey': ActorMethod<[], string>,
-  'hasSubscription' : ActorMethod<[Principal, string], boolean>,
-  'subscribe': ActorMethod<[Principal, Subscription], undefined>,
-  'unsubscribe': ActorMethod<[Principal, string], undefined>,
-  'unsubscribeAll': ActorMethod<[Principal], undefined>,
+export interface RelayerInfo {
+  'relayer': Principal,
+  'description': string,
+  'lastUpdatedAt': bigint,
+  'vapid_public_key': string,
+  'registeredAt': bigint,
 }
 
 export interface Subscription {
   'endpoint': string,
-  'keys': { 'auth': string, 'p256dh': string },
+  'keys': SubscriptionKeys,
+  'relayer': Principal,
   'expirationTime': [] | [bigint],
 }
 
-export interface _SERVICE extends NotificationCanister {
+export interface SubscriptionKeys {
+  'auth': string,
+  'p256dh': string
+}
+
+export interface _SERVICE {
+  'getVapidPublicKey': ActorMethod<[Principal], string>,
+  'hasSubscription': ActorMethod<[Principal, string], boolean>,
+  'listRelayers': ActorMethod<[], Array<RelayerInfo>>,
+  'subscribe': ActorMethod<[Principal, Subscription], undefined>,
+  'unsubscribe': ActorMethod<[Principal, string], undefined>,
+  'unsubscribeAll': ActorMethod<[Principal], undefined>,
 }
 
 export declare const idlFactory: IDL.InterfaceFactory;

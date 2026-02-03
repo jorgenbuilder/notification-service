@@ -67,6 +67,7 @@ mod helpers {
         pub endpoint: String,
         pub expirationTime: Option<u64>,
         pub keys: Keys,
+        pub relayer: Principal,
     }
     #[derive(CandidType, Serialize, Clone)]
     pub struct NotificationBody {
@@ -155,7 +156,7 @@ mod helpers {
         pub auth_secret: Vec<u8>,
     }
 
-    pub fn mk_valid_sub_with_creds(endpoint: &str) -> (Subscription, ClientCred) {
+    pub fn mk_valid_sub_with_creds(endpoint: &str, relayer: Principal) -> (Subscription, ClientCred) {
         let sk = derive_test_sk(endpoint);
         let pk = sk.public_key();
         let pk_uncompressed = pk.to_encoded_point(false).as_bytes().to_vec(); // 65 bytes starting 0x04
@@ -167,6 +168,7 @@ mod helpers {
                 p256dh: b64url(&pk_uncompressed),
                 auth: b64url(&auth_secret),
             },
+            relayer,
         };
         let cred = ClientCred {
             sk,
@@ -236,14 +238,14 @@ mod helpers {
         pub pic: PocketIc,
         pub canister_id: Principal,
         controller: Principal,
-        worker: Principal,
+        relayer: Principal,
         app_manager: Principal,
     }
 
     impl TestEnv {
         pub fn new() -> Self {
             let controller = principal(0xC1);
-            let worker = principal(0xC2);
+            let relayer = principal(0xC2);
             let app_manager = principal(0xC3);
 
             let pic = PocketIc::new();
@@ -252,23 +254,25 @@ mod helpers {
             pic.add_cycles(canister_id, 10_000_000_000_000u128);
 
             let wasm = super::load_wasm();
-            let init_arg = Encode!(&worker).expect("encode init arg");
+            let init_arg = Encode!().expect("encode empty init arg");
             pic.install_canister(canister_id, wasm, init_arg, Some(controller));
 
-            // Register the application (managed by app_manager)
+            // Register the relayer (required for peek/pop)
+            let vapid_key = "TEST_VAPID_PUBLIC_KEY".to_string();
+            let description = "local test relayer".to_string();
             let _ = super::call_update(
                 &pic,
                 canister_id,
                 controller,
-                "registerApplication",
-                Encode!(&app_manager).unwrap(),
+                "registerRelayer",
+                Encode!(&relayer, &vapid_key, &description).unwrap(),
             );
 
             Self {
                 pic,
                 canister_id,
                 controller,
-                worker,
+                relayer,
                 app_manager,
             }
         }
@@ -276,8 +280,8 @@ mod helpers {
         pub fn controller(&self) -> Principal {
             self.controller
         }
-        pub fn worker(&self) -> Principal {
-            self.worker
+        pub fn relayer(&self) -> Principal {
+            self.relayer
         }
         pub fn app_manager(&self) -> Principal {
             self.app_manager
@@ -309,7 +313,7 @@ mod helpers {
             let bytes = super::call_query(
                 &self.pic,
                 self.canister_id,
-                self.worker,
+                self.relayer,
                 "peekQueue",
                 Encode!(&offset).unwrap(),
             )?;
@@ -322,7 +326,7 @@ mod helpers {
             super::call_update(
                 &self.pic,
                 self.canister_id,
-                self.worker,
+                self.relayer,
                 "popQueue",
                 Encode!(&n).unwrap(),
             )
@@ -334,15 +338,15 @@ mod helpers {
 #[test]
 fn notifications_queue_basic_flow() {
     use helpers as h;
-    // Test environment with controller/worker/app_manager set up and app registered
+    // Test environment with controller/relayer/app_manager set up and app registered
     let env = h::TestEnv::new();
     let controller = env.controller();
     let app_manager = env.app_manager();
     let user1 = h::principal(0x04);
 
     // Subscribe two endpoints with valid keys and collect creds for decryption
-    let (sub1, cred1) = h::mk_valid_sub_with_creds("https://push.example/ep-1");
-    let (sub2, cred2) = h::mk_valid_sub_with_creds("https://push.example/ep-2");
+    let (sub1, cred1) = h::mk_valid_sub_with_creds("https://push.example/ep-1", env.relayer());
+    let (sub2, cred2) = h::mk_valid_sub_with_creds("https://push.example/ep-2", env.relayer());
     env.subscribe(user1, &sub1).expect("subscribe ep-1");
     env.subscribe(user1, &sub2).expect("subscribe ep-2");
     let mut creds: HashMap<String, h::ClientCred> = HashMap::new();
@@ -359,7 +363,7 @@ fn notifications_queue_basic_flow() {
     env.send(&vec![(user1, body)])
         .expect("sendNotifications failed");
 
-    // Non-worker cannot peek
+    // Non-relayer cannot peek
     let res = call_query(
         &env.pic,
         env.canister_id,
@@ -367,10 +371,10 @@ fn notifications_queue_basic_flow() {
         "peekQueue",
         Encode!(&0u64).unwrap(),
     );
-    assert!(res.is_err(), "peekQueue by non-worker should reject");
+    assert!(res.is_err(), "peekQueue by non-relayer should reject");
 
-    // Worker can peek; expect 2 items, FIFO order of endpoints
-    let (list, _is_drained) = env.peek(0).expect("worker peek");
+    // Relayer can peek; expect 2 items, FIFO order of endpoints
+    let (list, _is_drained) = env.peek(0).expect("relayer peek");
     assert_eq!(list.len(), 2, "expected two queued notifications");
     assert_eq!(list[0].endpoint, "https://push.example/ep-1");
     assert_eq!(list[1].endpoint, "https://push.example/ep-2");
@@ -405,7 +409,7 @@ fn pop_more_than_queue_len_is_safe() {
     let user1 = h::principal(0x14);
 
     // Subscribe single endpoint with valid keys and send 1 notification
-    let (sub, cred) = h::mk_valid_sub_with_creds("https://push.example/only");
+    let (sub, cred) = h::mk_valid_sub_with_creds("https://push.example/only", env.relayer());
     env.subscribe(user1, &sub).expect("subscribe");
     env.send(&vec![(
         user1,
@@ -429,7 +433,7 @@ fn pop_more_than_queue_len_is_safe() {
     env.pop(10).expect("popQueue(10)");
 
     // Queue should be empty now
-    let (list, _d_after) = env.peek(0).expect("peek by worker");
+    let (list, _d_after) = env.peek(0).expect("peek by relayer");
     assert!(
         list.is_empty(),
         "queue should be empty after popping more than present"
@@ -449,7 +453,7 @@ fn peek_then_push_then_pop_then_peek_no_skip_no_repeat() {
         .collect();
     let mut creds: HashMap<String, h::ClientCred> = HashMap::new();
     for ep in &batch1_eps {
-        let (sub, cred) = h::mk_valid_sub_with_creds(ep);
+        let (sub, cred) = h::mk_valid_sub_with_creds(ep, env.relayer());
         env.subscribe(user1, &sub).expect("subscribe batch1");
         creds.insert(sub.endpoint.clone(), cred);
     }
@@ -485,7 +489,7 @@ fn peek_then_push_then_pop_then_peek_no_skip_no_repeat() {
         .map(|i| format!("https://push.example/ep-{}", i))
         .collect();
     for ep in &batch2_eps {
-        let (sub, cred) = h::mk_valid_sub_with_creds(ep);
+        let (sub, cred) = h::mk_valid_sub_with_creds(ep, env.relayer());
         env.subscribe(user1, &sub).expect("subscribe batch2");
         creds.insert(sub.endpoint.clone(), cred);
     }
@@ -545,7 +549,7 @@ fn single_subscription_many_notifications() {
     let user1 = h::principal(0x34);
 
     // Subscribe single endpoint with valid keys to enable encryption + decryption
-    let (sub, cred) = h::mk_valid_sub_with_creds("https://push.example/single");
+    let (sub, cred) = h::mk_valid_sub_with_creds("https://push.example/single", env.relayer());
     env.subscribe(user1, &sub)
         .expect("subscribe single endpoint");
     let mk_body = |i: usize| h::NotificationBody {
@@ -607,7 +611,7 @@ fn peek_queue_pagination_and_is_drained() {
         .map(|i| format!("https://push.example/pag-{}", i))
         .collect();
     for ep in &eps {
-        let (sub, _cred) = h::mk_valid_sub_with_creds(ep);
+        let (sub, _cred) = h::mk_valid_sub_with_creds(ep, env.relayer());
         env.subscribe(user, &sub).expect("subscribe");
     }
     env.send(&vec![(

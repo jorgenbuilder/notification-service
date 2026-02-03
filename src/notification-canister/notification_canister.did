@@ -7,6 +7,7 @@ type Subscription = record {
   endpoint: text;
   expirationTime: opt nat;
   keys: SubscriptionKeys;
+  relayer: principal;
 };
 
 type NotificationBody = record {
@@ -40,9 +41,21 @@ type HttpResponse = record {
   body: blob;
 };
 
-service : (principal) -> {
+type RelayerInfo = record {
+  relayer: principal;
+  vapid_public_key: text;
+  registeredAt: nat64;
+  lastUpdatedAt: nat64;
+  description: text;
+};
+
+service : () -> {
+  // admin interface
+  registerRelayer: (principal, text, text) -> ();
+
   // end-user interface
-  getVapidPublicKey: () -> (text) query;
+  listRelayers: () -> (vec RelayerInfo) query;
+  getVapidPublicKey: (principal) -> (text) query;
   hasSubscription: (principal, text) -> (bool) query;
   subscribe: (principal, Subscription) -> ();
   unsubscribe: (principal, text) -> ();
@@ -52,9 +65,10 @@ service : (principal) -> {
   sendNotifications: (vec record {
     0: principal;
     1: NotificationBody;
-  }) -> ();
+  }) -> (vec bool);
 
-  // worker interface
+  // relayer interface
+  updateRelayer: (text, text) -> ();
   peekQueue: (nat64) -> (record { items: vec EncryptedNotification; drained: bool }) query;
   popQueue: (nat64) -> ();
   reportBrokenSubscriptions: (vec record {

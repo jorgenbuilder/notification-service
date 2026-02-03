@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "vite --port 3000",
-    "copy:sw": "node -e \"const fs=require('fs'),p=require('path');const src=p.join(process.cwd(),'node_modules','ic-web-push','sw.js');const destDir=p.join(process.cwd(),'public');const dest=p.join(destDir,'sw.js');fs.mkdirSync(destDir,{recursive:true});fs.copyFileSync(src,dest);console.log('[chat_frontend] Copied',src,'->',dest);\"",
+    "copy:sw": "node -e \"const fs=require('fs'),p=require('path');const src=p.join(process.cwd(),'node_modules','ic-web-push','sw.js');const destDir=p.join(process.cwd(),'public');const dest=p.join(destDir,'ic-web-push-sw.js');fs.mkdirSync(destDir,{recursive:true});fs.copyFileSync(src,dest);console.log('[chat_frontend] Copied',src,'->',dest);\"",
     "postinstall": "npm run copy:sw",
     "prebuild": "npm run copy:sw && dfx generate chat_backend",
     "build": "vite build",

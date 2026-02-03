@@ -1,12 +1,12 @@
 # Notification Canister
 
-This Rust canister powers the web‑push notification flow for applications running on the Internet Computer. It stores user subscriptions per application, accepts notification requests from application managers, and exposes a worker‑only queue interface for an off‑chain worker to deliver push messages to endpoints.
+This Rust canister powers the web‑push notification flow for applications running on the Internet Computer. It stores user subscriptions per application, accepts notification requests from application managers, and exposes a relayer‑only queue interface for an off‑chain relayer to deliver push messages to endpoints.
 
 ## What this canister is for
 
 - Manage applications and their user subscriptions (Web Push `endpoint` + keys).
 - Allow application owners (managers) to enqueue notifications for specific users via `sendNotifications`.
-- Maintain a FIFO notifications queue that an external worker process can read (`peekQueue`) and drain (`popQueue`).
+- Maintain a FIFO notifications queue that an external relayer process can read (`peekQueue`) and drain (`popQueue`).
 - Provide deterministic AES‑128‑GCM web‑push payload encryption for compatible subscriptions when valid keys are present (encryption is optional; queue mechanics work regardless).
 
 ### High‑level interfaces
@@ -17,7 +17,7 @@ This Rust canister powers the web‑push notification flow for applications runn
   - `getVapidPublicKey()`
 - Application owner (manager == caller):
   - `sendNotifications([(user, NotificationBody)])`
-- Worker (designated at init):
+- Relayer (designated at init):
   - `peekQueue(offset) -> ([EncryptedNotification], isDrained)` (up to 100, FIFO)
   - `popQueue(amount)`
   - `reportBrokenSubscriptions([(application, user, endpoint)])`
@@ -79,10 +79,10 @@ cargo test -p notification-canister notifications_queue_basic_flow
 
 ## Notes
 
-- The queue is FIFO and capped per `peekQueue` call (returns up to 100 items or stops early if instruction budget is approached). Use repeated `peekQueue` + `popQueue` cycles in your worker.
+- The queue is FIFO and capped per `peekQueue` call (returns up to 100 items or stops early if instruction budget is approached). Use repeated `peekQueue` + `popQueue` cycles in your relayer.
 - Access control:
-  - Only the configured worker principal can call `peekQueue`, `popQueue`, and `reportBrokenSubscriptions`.
+  - Only the configured relayer principal can call `peekQueue`, `popQueue`, and `reportBrokenSubscriptions`.
   - Only canister controllers can `registerApplication`/`deregisterApplication`.
   - `sendNotifications` can be called by the application manager principal (the application is keyed by manager principal in this implementation).
 - Encryption:
-  - When subscription keys are valid (base64url P‑256 key and auth secret), payloads are deterministically encrypted as `aes128gcm`. If keys are invalid/missing, `encrypted` is `None` so workers can still deliver plain notifications or handle accordingly.
+  - When subscription keys are valid (base64url P‑256 key and auth secret), payloads are deterministically encrypted as `aes128gcm`. If keys are invalid/missing, `encrypted` is `None` so relayers can still deliver plain notifications or handle accordingly.

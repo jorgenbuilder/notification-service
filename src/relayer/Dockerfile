@@ -1,4 +1,4 @@
-# Multi-stage build for the notification worker
+# Multi-stage build for the notification relayer
 # Build stage
 FROM node:20-alpine AS builder
 WORKDIR /app

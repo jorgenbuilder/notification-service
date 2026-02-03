@@ -1,22 +1,34 @@
 export const idlFactory = ({IDL}) => {
+    const RelayerInfo = IDL.Record({
+        'relayer': IDL.Principal,
+        'description': IDL.Text,
+        'lastUpdatedAt': IDL.Nat64,
+        'vapid_public_key': IDL.Text,
+        'registeredAt': IDL.Nat64,
+    });
+    const SubscriptionKeys = IDL.Record({
+        'auth': IDL.Text,
+        'p256dh': IDL.Text,
+    });
     const Subscription = IDL.Record({
         'endpoint': IDL.Text,
-        'keys': IDL.Record({'auth': IDL.Text, 'p256dh': IDL.Text}),
+        'keys': SubscriptionKeys,
+        'relayer': IDL.Principal,
         'expirationTime': IDL.Opt(IDL.Nat),
     });
-    const NotificationCanister = IDL.Service({
-        'getVapidPublicKey': IDL.Func([], [IDL.Text], ['query']),
-        'hasSubscription' : IDL.Func(
+    return IDL.Service({
+        'getVapidPublicKey': IDL.Func([IDL.Principal], [IDL.Text], ['query']),
+        'hasSubscription': IDL.Func(
             [IDL.Principal, IDL.Text],
             [IDL.Bool],
             ['query'],
         ),
-        'subscribe': IDL.Func([IDL.Principal, Subscription], [], ['oneway']),
-        'unsubscribe': IDL.Func([IDL.Principal, IDL.Text], [], ['oneway']),
-        'unsubscribeAll': IDL.Func([IDL.Principal], [], ['oneway']),
+        'listRelayers': IDL.Func([], [IDL.Vec(RelayerInfo)], ['query']),
+        'subscribe': IDL.Func([IDL.Principal, Subscription], [], []),
+        'unsubscribe': IDL.Func([IDL.Principal, IDL.Text], [], []),
+        'unsubscribeAll': IDL.Func([IDL.Principal], [], []),
     });
-    return NotificationCanister;
 };
 export const init = ({IDL}) => {
-    return [IDL.Principal];
+    return [];
 };

@@ -1,15 +1,15 @@
 #!/usr/bin/env sh
 set -euo pipefail
 
-# Simple helper to build the Docker image and run the worker container detached.
+# Simple helper to build the Docker image and run the relayer container detached.
 # Usage:
 #   ./run-docker.sh            # build and start the scheduler
 #   ./run-docker.sh --once     # run a single cycle (container exits when done)
 #   IMAGE_NAME=mytag ./run-docker.sh   # override image tag
 #   CONTAINER_NAME=myname ./run-docker.sh --once
 
-IMAGE_NAME=${IMAGE_NAME:-notification-worker:latest}
-CONTAINER_NAME=${CONTAINER_NAME:-notification-worker}
+IMAGE_NAME=${IMAGE_NAME:-notification-relayer:latest}
+CONTAINER_NAME=${CONTAINER_NAME:-notification-relayer}
 BUILD_CONTEXT_DIR=$(dirname "$0")
 
 cd "$BUILD_CONTEXT_DIR"

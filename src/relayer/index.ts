@@ -9,7 +9,7 @@ export interface Env {
   NOTIFICATION_CANISTER_ID: string;
   VAPID_SUBJECT: string;
   VAPID_PUBLIC_KEY: string;
-  WORKER_ED25519_SECRET_KEY: string;
+  RELAYER_ED25519_SECRET_KEY: string;
   VAPID_PRIVATE_KEY: string;
 }
 
@@ -175,7 +175,7 @@ async function runCycle(env: Env): Promise<boolean> {
       warn('NOTIFICATION_CANISTER_ID is not set. Skipping cycle.');
       return false;
     }
-    const identity = identityFromBase64Secret(env.WORKER_ED25519_SECRET_KEY);
+    const identity = identityFromBase64Secret(env.RELAYER_ED25519_SECRET_KEY);
     const agent = new HttpAgent({ host: env.IC_HOST, identity, fetch: (globalThis as any).fetch?.bind(globalThis) });
 
     if (env.IC_HOST.startsWith('http://127.0.0.1') || env.IC_HOST.startsWith('http://localhost')) {
@@ -212,7 +212,7 @@ function loadEnv(): Env {
     NOTIFICATION_CANISTER_ID: process.env.NOTIFICATION_CANISTER_ID || '',
     VAPID_SUBJECT: process.env.VAPID_SUBJECT || '',
     VAPID_PUBLIC_KEY: process.env.VAPID_PUBLIC_KEY || '',
-    WORKER_ED25519_SECRET_KEY: process.env.WORKER_ED25519_SECRET_KEY || '',
+    RELAYER_ED25519_SECRET_KEY: process.env.RELAYER_ED25519_SECRET_KEY || '',
     VAPID_PRIVATE_KEY: process.env.VAPID_PRIVATE_KEY || '',
   };
 }
