@@ -49,6 +49,8 @@ const agent = new HttpAgent({ host: 'https://ic0.app' });
 // If developing locally against a replica, you may need:
 // await agent.fetchRootKey();
 
+// Ensure the user is authenticated and the identity is set to the agent reference before proceeding
+
 icWebPush.init({
   agent,
   // Notification canister ID (defaults to mainnet id):
@@ -218,7 +220,7 @@ export default function App() {
 
 ## Sending notifications
 
-From your canister or backend, call `sendNotifications` with a vector of `(principal, NotificationBody)` pairs on the notification canister. The `principal` should be your application canister principal that was used when registering subscriptions.
+From your canister or backend, call `sendNotifications` with a vector of `(principal, NotificationBody)` pairs on the notification canister. The `principal` should be your user's principal.
 
 `NotificationBody` schema:
 ```candid

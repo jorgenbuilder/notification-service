@@ -1,6 +1,6 @@
 {
-  "name": "ic-web-push",
-  "version": "0.1.0",
+  "name": "@research-ag/ic-web-push",
+  "version": "0.1.1",
   "description": "Browser SDK for Internet Computer web push notifications with a companion service worker.",
   "type": "module",
   "main": "./dist/index.js",
