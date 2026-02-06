@@ -43,7 +43,7 @@ You can also customize the path/scope via `init()` if you prefer a different loc
 
 ```ts
 import icWebPush from 'ic-web-push';
-import { HttpAgent } from '@dfinity/agent';
+import { HttpAgent } from '@icp-sdk/core/agent';
 
 const agent = new HttpAgent({ host: 'https://ic0.app' });
 // If developing locally against a replica, you may need:

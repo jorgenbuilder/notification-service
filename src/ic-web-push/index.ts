@@ -1,5 +1,5 @@
-import { Actor, HttpAgent } from '@dfinity/agent';
-import { Principal } from '@dfinity/principal';
+import { Actor, HttpAgent } from '@icp-sdk/core/agent';
+import { Principal } from '@icp-sdk/core/principal';
 import {
   idlFactory as notificationIdlFactory
 } from './declarations/notification_canister/notification_canister.did.js';

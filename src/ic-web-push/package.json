@@ -39,8 +39,7 @@
     "typescript": "^5.4.0"
   },
   "peerDependencies": {
-    "@dfinity/agent": "^3.4.3",
-    "@dfinity/principal": "^3.4.3"
+    "@icp-sdk/core": "^5.0.0"
   },
   "sideEffects": false
 }
