@@ -17,6 +17,9 @@
     "sw.js",
     "README.md"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "clean": "rimraf dist",
     "copy:declarations": "node -e \"const fs=require('fs');const path=require('path');const src=path.join(process.cwd(),'declarations');const dest=path.join(process.cwd(),'dist','declarations');try{if(fs.existsSync(src)){fs.rmSync(dest,{recursive:true,force:true});fs.mkdirSync(dest,{recursive:true});fs.cpSync(src,dest,{recursive:true});console.log('[ic-web-push] Copied',src,'->',dest);}else{console.warn('[ic-web-push] No declarations directory found at',src);}}catch(e){console.error('[ic-web-push] Failed to copy declarations:',e&&e.message||e);process.exitCode=1;}\"",
@@ -32,10 +35,8 @@
   ],
   "author": "",
   "license": "MIT",
-  "dependencies": {
-  },
   "devDependencies": {
-    "rimraf": "^5.0.5",
+    "rimraf": "^6.1.3",
     "typescript": "^5.4.0"
   },
   "peerDependencies": {
