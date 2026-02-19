@@ -187,23 +187,57 @@ function subscriptionToRecord(sub: PushSubscription, relayer: Principal): any {
   };
 }
 
-const LS = {
-  registered: 'icwp.registered',
-  endpoint: 'icwp.endpoint',
-  relayer: 'icwp.relayer',
-};
+const LS = (principalText: string) => ({
+  registered: `icwp.${principalText}.registered`,
+  endpoint: `icwp.${principalText}.endpoint`,
+  relayer: `icwp.${principalText}.relayer`,
+});
 
-function setLocalRegistered(endpoint: string | null) {
+async function getCurrentPrincipalText(): Promise<string | null> {
+  try {
+    return (await _config?.agent.getPrincipal())?.toText();
+  } catch (err) {
+    dbg('[ic-web-push] Failed to get current principal:', err);
+  }
+  return null;
+}
+
+async function isCurrentPrincipalAnonymous(): Promise<boolean> {
+  const pt = await getCurrentPrincipalText();
+  return !pt || pt === '2vxsx-fae';
+}
+
+function setLocalRegistered(principalText: string, endpoint: string | null) {
+  const keys = LS(principalText);
   try {
     if (endpoint) {
-      localStorage.setItem(LS.registered, '1');
-      localStorage.setItem(LS.endpoint, endpoint);
+      localStorage.setItem(keys.registered, '1');
+      localStorage.setItem(keys.endpoint, endpoint);
     } else {
-      localStorage.removeItem(LS.registered);
-      localStorage.removeItem(LS.endpoint);
+      localStorage.removeItem(keys.registered);
+      localStorage.removeItem(keys.endpoint);
     }
   } catch {
   }
+}
+
+function setLocalRelayer(principalText: string, relayerText: string | null) {
+  const keys = LS(principalText);
+  try {
+    if (relayerText) {
+      localStorage.setItem(keys.relayer, relayerText);
+    } else {
+      localStorage.removeItem(keys.relayer);
+    }
+  } catch {
+  }
+}
+
+async function clearLocalForCurrentPrincipal() {
+  const pt = await getCurrentPrincipalText();
+  if (!pt) return;
+  setLocalRegistered(pt, null);
+  setLocalRelayer(pt, null);
 }
 
 export async function getSubscription(): Promise<PushSubscription | null> {
@@ -219,40 +253,52 @@ export async function getSubscription(): Promise<PushSubscription | null> {
 }
 
 export async function isSubscribed(): Promise<boolean> {
+  if (await isCurrentPrincipalAnonymous()) return false;
+  const pt = (await getCurrentPrincipalText())!;
+
   const sub = await getSubscription();
   if (!sub) return false;
 
   // Best-effort relayer consistency check: if we stored a relayer locally, ensure it's still registered.
   try {
-    const storedRelayerTxt = localStorage.getItem(LS.relayer);
+    const storedRelayerTxt = localStorage.getItem(LS(pt).relayer);
     if (storedRelayerTxt) {
       const relayers = await listRelayers();
       const exists = relayers.some(r => r.relayer.toText() === storedRelayerTxt);
       if (!exists) {
-        dbg('[ic-web-push] Stored relayer is no longer registered. Treating as unsubscribed.');
+        dbg('[ic-web-push] Stored relayer is no longer registered. Treating as unsubscribed for current principal.');
         return false;
       }
     }
   } catch {
   }
 
-  // If applicationCanisterId is configured, verify with server canister.
+  // If there is no local record for this principal, report not subscribed
+  try {
+    const keys = LS(pt);
+    const perEndpoint = localStorage.getItem(keys.endpoint);
+    const perRegistered = localStorage.getItem(keys.registered);
+    if (!perRegistered || !perEndpoint) {
+      return false;
+    }
+    if (perEndpoint !== sub.endpoint) {
+      // Local record exists for current principal but endpoint differs from current browser endpoint
+      // Consider not subscribed for this principal; do not change browser subscription.
+      return false;
+    }
+  } catch {
+  }
+
+  // If applicationCanisterId is configured, verify with server canister
   if (_config.applicationCanisterId) {
     try {
       const actor = await getActor();
       const app = Principal.fromText(_config.applicationCanisterId);
       const ok: boolean = await actor.hasSubscription(app, sub.endpoint);
       if (!ok) {
-        dbg('[ic-web-push] Local subscription not found on the canister. Removing it locally')
-        // Remote canister has no record: revoke local subscription to keep state consistent.
-        try {
-          await sub.unsubscribe();
-        } catch (e) {
-          dbg('[ic-web-push] Failed to unsubscribe local PushSubscription after remote mismatch:', e);
-          console.warn('[ic-web-push] Failed to unsubscribe local PushSubscription after remote mismatch:', e);
-        } finally {
-          setLocalRegistered(null);
-        }
+        dbg('[ic-web-push] Local subscription not found on the canister for current principal. Removing it locally');
+        // Do NOT unsubscribe browser here; it may be registered for another principal.
+        await clearLocalForCurrentPrincipal();
         return false;
       }
     } catch (e) {
@@ -276,8 +322,11 @@ async function ensureServiceWorkerReady(): Promise<ServiceWorkerRegistration> {
 
 /** Subscribe the browser and register the subscription on the notification canister. */
 export async function subscribe(options?: SubscribeOptions): Promise<PushSubscription> {
+  if (await isCurrentPrincipalAnonymous()) throw new Error('ic-web-push: Anonymous principal is not supported for subscriptions');
   if (!_config.applicationCanisterId) throw new Error('ic-web-push: applicationCanisterId is required in init() to subscribe');
   if (!ensurePushSupported()) throw new Error('ic-web-push: Push not supported');
+
+  const pt = (await getCurrentPrincipalText())!;
 
   const permission = await getPermissionStatus();
   if (permission !== 'granted') {
@@ -292,9 +341,10 @@ export async function subscribe(options?: SubscribeOptions): Promise<PushSubscri
   // Resolve relayer to use
   let relayer: Principal | null = null;
   try {
-    if (options?.relayer) relayer = toPrincipal(options.relayer);
-    else {
-      const stored = localStorage.getItem(LS.relayer);
+    if (options?.relayer) {
+      relayer = toPrincipal(options.relayer);
+    } else {
+      const stored = localStorage.getItem(LS(pt).relayer);
       if (stored) relayer = Principal.fromText(stored);
     }
   } catch {
@@ -325,9 +375,9 @@ export async function subscribe(options?: SubscribeOptions): Promise<PushSubscri
   const actor = await getActor();
   const app = Principal.fromText(_config.applicationCanisterId!);
   await actor.subscribe(app, subscriptionToRecord(subscription, relayer));
-  setLocalRegistered(subscription.endpoint);
+  setLocalRegistered(pt, subscription.endpoint);
   try {
-    localStorage.setItem(LS.relayer, relayer.toText());
+    setLocalRelayer(pt, relayer.toText());
   } catch {
   }
   dbg('Subscription registered on canister with relayer', relayer.toText());
@@ -341,23 +391,44 @@ export async function unsubscribe(): Promise<void> {
     dbg('No subscription present');
     return;
   }
+  const pt = await getCurrentPrincipalText();
+  const matchesCurrentPrincipal = (() => {
+    if (!pt) return false;
+    try {
+      const keys = LS(pt);
+      const perEndpoint = localStorage.getItem(keys.endpoint);
+      return perEndpoint === sub.endpoint;
+    } catch {
+      return false;
+    }
+  })();
+
   try {
-    // Try unregister on canister first
+    // Try unregister on canister first (for current principal)
     const actor = await getActor();
     if (_config.applicationCanisterId) {
       const app = Principal.fromText(_config.applicationCanisterId);
       await actor.unsubscribe(app, sub.endpoint);
-      dbg('Subscription removed from canister. Endpoint: ', sub.endpoint);
+      dbg('Subscription removed from canister for current principal (if existed). Endpoint:', sub.endpoint);
     }
   } catch (e) {
-    dbg('[ic-web-push] Failed to unregister on canister (will still remove local sub):', e);
-    console.warn('[ic-web-push] Failed to unregister on canister (will still remove local sub):', e);
+    dbg('[ic-web-push] Failed to unregister on canister for current principal (may still remove local state):', e);
+    console.warn('[ic-web-push] Failed to unregister on canister for current principal (may still remove local state):', e);
   }
-  try {
-    const ok = await sub.unsubscribe();
-    dbg('Browser PushSubscription unsubscribed:', ok);
-  } finally {
-    setLocalRegistered(null);
+
+  if (matchesCurrentPrincipal) {
+    // Only unsubscribe the browser-wide PushSubscription if it belongs to the current principal
+    try {
+      const ok = await sub.unsubscribe();
+      dbg('Browser PushSubscription unsubscribed:', ok);
+    } finally {
+      // Clear per-principal local state for current identity
+      await clearLocalForCurrentPrincipal();
+    }
+  } else {
+    // Do not touch the browser subscription since it likely belongs to a different principal.
+    await clearLocalForCurrentPrincipal();
+    dbg('Skipped unsubscribing browser subscription as it does not match current principal.');
   }
 }
 
@@ -373,6 +444,7 @@ export async function unsubscribeAll(): Promise<void> {
 
 // Convenience: combined flow to ensure sw + permission + subscription
 export async function ensureSubscribed(options?: SubscribeOptions): Promise<PushSubscription> {
+  if (await isCurrentPrincipalAnonymous()) throw new Error('ic-web-push: Anonymous principal is not supported for subscriptions');
   await registerServiceWorker();
   if ((await getPermissionStatus()) !== 'granted') {
     if (options?.requestPermissionIfNeeded) {
