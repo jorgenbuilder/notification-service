@@ -82,7 +82,6 @@ cargo test -p notification-canister notifications_queue_basic_flow
 - The queue is FIFO and capped per `peekQueue` call (returns up to 100 items or stops early if instruction budget is approached). Use repeated `peekQueue` + `popQueue` cycles in your relayer.
 - Access control:
   - Only the configured relayer principal can call `peekQueue`, `popQueue`, and `reportBrokenSubscriptions`.
-  - Only canister controllers can `registerApplication`/`deregisterApplication`.
   - `sendNotifications` can be called by the application manager principal (the application is keyed by manager principal in this implementation).
 - Encryption:
   - When subscription keys are valid (base64url P‑256 key and auth secret), payloads are deterministically encrypted as `aes128gcm`. If keys are invalid/missing, `encrypted` is `None` so relayers can still deliver plain notifications or handle accordingly.
