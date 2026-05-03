@@ -19,7 +19,25 @@ This guide assumes you can already drive [`icp`](https://cli.internetcomputer.or
 
 ## 1. Notification canister
 
-Build and deploy on a local replica:
+Two options. Pick whichever matches your CLI of choice.
+
+**Option A — pull via `dfx` (recommended).** The canister exposes `dfx:pullable` metadata, so dfx fetches the released wasm directly. In your project's `dfx.json`:
+
+```json
+{
+  "version": 1,
+  "canisters": {
+    "notification_canister": {
+      "type": "pull",
+      "id": "zjwxf-jyaaa-aaaao-a43ca-cai"
+    }
+  }
+}
+```
+
+Then `dfx deps pull && dfx deps init && dfx deps deploy`. The local canister id matches the mainnet one. `icp` doesn't yet support deps pull, so this step is dfx-only — but it composes fine with the rest of the guide running on `icp`.
+
+**Option B — build from source via `icp`.** Use this if you're staying on `icp` end-to-end, or if you're modifying the canister:
 
 ```bash
 git clone https://github.com/research-ag/notification-service.git
@@ -27,7 +45,9 @@ cd notification-service
 cargo build --release --target wasm32-unknown-unknown
 ```
 
-Register the resulting `target/wasm32-unknown-unknown/release/notification_canister.wasm` as a pre-built canister in your project and deploy locally. Note the canister id — relayer, app canister, and frontend all need it.
+Register the resulting `target/wasm32-unknown-unknown/release/notification_canister.wasm` as a pre-built canister in your `icp.yaml` and `icp deploy`.
+
+Note the canister id either way — relayer, app canister, and frontend all need it.
 
 ## 2. Relayer
 

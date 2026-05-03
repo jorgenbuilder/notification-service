@@ -10,6 +10,11 @@
           "ts"
         ],
         "output": "./declarations/notification_canister"
+      },
+      "pullable": {
+        "wasm_url": "https://github.com/jorgenbuilder/notification-service/releases/download/v0.1.2-pullable-test/notification_canister.wasm",
+        "dependencies": [],
+        "init_guide": "No init arguments required."
       }
     },
     "chat_backend": {
