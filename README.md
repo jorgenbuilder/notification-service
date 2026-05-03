@@ -1,5 +1,9 @@
 # notification-service
 
+## Local development
+
+For a step-by-step guide to running the full stack — notification canister, relayer, an app canister, and a browser — on a single machine, see [LOCAL_DEV.md](./LOCAL_DEV.md).
+
 ## Tests
 
 If `cargo test -p notification-canister` appears to use an old Wasm, build the canister Wasm first, then run the tests from the repository root:
