@@ -55,7 +55,7 @@ The relayer (`src/relayer/`) polls the canister every ~10s and delivers Web Push
 
 - `IC_HOST` — your local replica
 - `NOTIFICATION_CANISTER_ID` — from step 1
-- `RELAYER_ED25519_SECRET_KEY` — base64-encoded 32-byte secret. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
+- `RELAYER_ED25519_SECRET_KEY` — base64 of 32 or 64 bytes Ed25519 secret material (seed or secret+public). Generate a 32-byte seed with: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
 - `VAPID_SUBJECT`, `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` — generate the keypair once with `npx web-push generate-vapid-keys`
 
 Then `npm ci && npm run build && npm run start`. Until step 3 completes you'll see `'Relayer not registered'` traps every poll cycle — expected.
